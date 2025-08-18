@@ -1,20 +1,20 @@
-# WProxy 配置文件
+# WProxy configuration file
 
-# 监听地址
+# Listening address
 listen_address = '127.0.0.1:1080'
 
-# 用户认证信息
+# User authentication information
 [users]
-# 格式: 用户名 = '密码'
-# 示例: admin = 'password'
+# Format: username = 'password'
+# Example: admin = 'password'
 
-# 缓冲区大小 (1-65536)
+# Buffer size (1-65536)
 buffer_size = 4096
 
 # Log settings
 [log]
 # Level for the log (Off, Error, Warn, Info, Debug, Trace)
-level = "Debug"
+level = "Info"
 # Path for the log file
 path = "logs/rust-proxy.log"
 # Pattern for the log file archive

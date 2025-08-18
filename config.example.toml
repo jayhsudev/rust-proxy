@@ -1,34 +1,34 @@
-# Rust Proxy 配置文件示例
-# 复制此文件为 config.toml 并根据需要修改配置
+# Rust Proxy configuration example
+# Copy this file as config.toml and modify the configuration as needed
 
-# 代理服务器监听地址和端口
+# Proxy server listening address and port
 listen_address = "127.0.0.1:1080"
 
-# 用户认证配置（可选）
-# 如果不需要认证，可以删除整个 [users] 部分
+# User authentication configuration (optional)
+# If authentication is not required, you can remove the entire [users] section
 [users]
-# 格式：用户名 = "密码"
-# 密码将使用 bcrypt 进行哈希处理
+# Format: username = "password"
+# Passwords will be hashed using bcrypt
 alice = "password123"
 bob = "securepass"
 
-# 日志配置
+# Log configuration
 [log]
-# 日志级别：trace, debug, info, warn, error
-level = "info"
+# Level for the log (Off, Error, Warn, Info, Debug, Trace)
+level = "Info"
 
-# 日志文件路径
+# Log file path
 path = "logs/rust-proxy.log"
 
-# 归档日志文件名模式（{}会被替换为时间戳）
+# Archive log file name pattern ({} will be replaced by timestamp)
 archive_pattern = "logs/archive/rust-proxy-{}.log"
 
-# 保留的日志文件数量
+# Number of log files to keep
 file_count = 5
 
-# 每个日志文件的最大大小（MB）
+# Maximum size of each log file (MB)
 file_size = 10
 
-# 网络操作缓冲区大小（字节）
-# 建议值：4096, 8192, 16384
+# Network buffer size (bytes)
+# Recommended values: 4096, 8192, 16384
 buffer_size = 4096
