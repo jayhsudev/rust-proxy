@@ -1,0 +1,4 @@
+2025-08-18 16:16:56 - INFO - Logger initialized with info level
+2025-08-18 16:16:56 - INFO - See 'logs/rust-proxy.log' for log and 'logs/archive/rust-proxy-{}.log' for archived logs
+2025-08-18 16:16:56 - INFO - Rust Proxy server starting with config: Config { listen_address: "127.0.0.1:8080", users: {"buffer_size": "4096"}, log: LoggerConfig { level: "info", path: "logs/rust-proxy.log", archive_pattern: "logs/archive/rust-proxy-{}.log", file_count: 5, file_size: 10 }, buffer_size: 4096 }
+2025-08-18 16:16:57 - INFO - TCP proxy listening on 127.0.0.1:8080
