@@ -39,6 +39,11 @@ impl AuthManager {
 
     /// Verify username and password
     pub fn authenticate(&self, username: &str, password: &str) -> Result<bool, AuthError> {
+        // If no users configured, bypass authentication
+        if self.users.is_empty() {
+            return Ok(true);
+        }
+        
         match self.users.get(username) {
             Some(hashed_password) => {
                 let is_valid = verify(password, hashed_password)?;
