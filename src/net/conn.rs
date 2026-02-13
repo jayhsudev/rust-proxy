@@ -71,6 +71,13 @@ impl BufferedConnection {
         self.stream.shutdown().await
     }
 
+    /// 将数据放回读缓冲区（用于协议检测后的恢复）
+    pub fn unread(&mut self, data: &[u8]) {
+        // Use splice to insert data at the beginning of the buffer
+        // This is O(n) but reuses existing allocation
+        self.read_buffer.splice(0..0, data.iter().copied());
+    }
+
     /// 获取底层TCP流
     #[allow(dead_code)]
     pub fn into_inner(self) -> TokioTcpStream {

@@ -11,10 +11,19 @@ use log4rs::{
     encode::pattern::PatternEncoder,
     filter::threshold::ThresholdFilter,
 };
+use std::fs;
+use std::path::Path;
 use std::str::FromStr;
 
 pub fn setup_logger(config: LoggerConfig) -> Result<log4rs::Handle, SetLoggerError> {
-    let level = LevelFilter::from_str(&config.level).unwrap_or(LevelFilter::Info);
+    let level = LevelFilter::from_str(&config.level).unwrap_or_else(|e| {
+        log::warn!(
+            "Invalid log level '{}': {}, defaulting to Info",
+            config.level,
+            e
+        );
+        LevelFilter::Info
+    });
     let trigger_file_size = config.file_size * 1024 * 1024; // MB
 
     // Build a stderr logger.
@@ -27,6 +36,11 @@ pub fn setup_logger(config: LoggerConfig) -> Result<log4rs::Handle, SetLoggerErr
         .build(&config.archive_pattern, config.file_count) // Roll based on pattern and max 3 archive files
         .unwrap();
     let policy = CompoundPolicy::new(Box::new(trigger), Box::new(roller));
+
+    // Ensure log directory exists
+    if let Some(parent) = Path::new(&config.path).parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
 
     // Logging to log file. (with rolling)
     let logfile = log4rs::append::rolling_file::RollingFileAppender::builder()

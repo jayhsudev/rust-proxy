@@ -126,7 +126,7 @@ impl Config {
         }
 
         // Try to parse listen address to ensure correct format
-        if let Err(_) = self.listen_address.parse::<std::net::SocketAddr>() {
+        if self.listen_address.parse::<std::net::SocketAddr>().is_err() {
             return Err(ConfigError::InvalidConfig(format!(
                 "Invalid listen address format: {}",
                 self.listen_address

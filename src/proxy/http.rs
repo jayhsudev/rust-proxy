@@ -66,34 +66,40 @@ impl HttpProxy {
         // 读取请求行
         let mut request_line = String::new();
         loop {
-            if let Some(byte) = conn.read_from_buffer(1) {
-                let c = byte[0] as char;
-                if c == '\n' {
-                    // 读取下一个字符是否是\r
+            // 确保有数据可读
+            if conn.available_bytes() == 0 && conn.read().await? == 0 {
+                return Err("Connection closed during request parsing".into());
+            }
 
-                    while conn.available_bytes() < 1 {
-                        if conn.read().await? == 0 {
-                            return Err("Connection closed during request parsing".into());
-                        }
-                    }
+            // 读取一个字节
+            let byte = match conn.read_from_buffer(1) {
+                Some(bytes) => bytes[0],
+                None => return Err("Connection closed during request parsing".into()),
+            };
+            let c = byte as char;
 
-                    let next_byte = conn.read_from_buffer(1).unwrap()[0] as char;
-                    if next_byte == '\r' {
-                        break;
-                    } else {
-                        request_line.push(c);
-                        request_line.push(next_byte);
-                    }
-                } else if c == '\r' {
-                    break;
-                } else {
-                    request_line.push(c);
-                }
-            } else {
-                // 缓冲区为空，尝试读取更多数据
-                if conn.read().await? == 0 {
+            if c == '\r' {
+                // 检查下一个字符是否是\n
+                if conn.available_bytes() == 0 && conn.read().await? == 0 {
                     return Err("Connection closed during request parsing".into());
                 }
+                let next_byte = match conn.read_from_buffer(1) {
+                    Some(bytes) => bytes[0],
+                    None => return Err("Connection closed during request parsing".into()),
+                };
+                if next_byte as char == '\n' {
+                    // 找到行结束符\r\n
+                    break;
+                } else {
+                    // 不是\n，把两个字符都加入
+                    request_line.push(c);
+                    request_line.push(next_byte as char);
+                }
+            } else if c == '\n' {
+                // 只有\n，也认为是行结束（兼容处理）
+                break;
+            } else {
+                request_line.push(c);
             }
         }
 
@@ -111,39 +117,46 @@ impl HttpProxy {
         let mut headers = std::collections::HashMap::new();
         loop {
             let mut header_line = String::new();
+
             loop {
-                if let Some(byte) = conn.read_from_buffer(1) {
-                    let c = byte[0] as char;
-                    if c == '\n' {
-                        // 读取下一个字符是否是\r
+                // 确保有数据可读
+                if conn.available_bytes() == 0 && conn.read().await? == 0 {
+                    return Err("Connection closed during header parsing".into());
+                }
 
-                        while conn.available_bytes() < 1 {
-                            if conn.read().await? == 0 {
-                                return Err("Connection closed during header parsing".into());
-                            }
-                        }
+                // 读取一个字节
+                let byte = match conn.read_from_buffer(1) {
+                    Some(bytes) => bytes[0],
+                    None => return Err("Connection closed during header parsing".into()),
+                };
+                let c = byte as char;
 
-                        let next_byte = conn.read_from_buffer(1).unwrap()[0] as char;
-                        if next_byte == '\r' {
-                            break;
-                        } else {
-                            header_line.push(c);
-                            header_line.push(next_byte);
-                        }
-                    } else if c == '\r' {
-                        break;
-                    } else {
-                        header_line.push(c);
-                    }
-                } else {
-                    // 缓冲区为空，尝试读取更多数据
-                    if conn.read().await? == 0 {
+                if c == '\r' {
+                    // 检查下一个字符是否是\n
+                    if conn.available_bytes() == 0 && conn.read().await? == 0 {
                         return Err("Connection closed during header parsing".into());
                     }
+                    let next_byte = match conn.read_from_buffer(1) {
+                        Some(bytes) => bytes[0],
+                        None => return Err("Connection closed during header parsing".into()),
+                    };
+                    if next_byte as char == '\n' {
+                        // 找到行结束符\r\n
+                        break;
+                    } else {
+                        // 不是\n，把两个字符都加入
+                        header_line.push(c);
+                        header_line.push(next_byte as char);
+                    }
+                } else if c == '\n' {
+                    // 只有\n，也认为是行结束（兼容处理）
+                    break;
+                } else {
+                    header_line.push(c);
                 }
             }
 
-            // 检查是否是头部结束符
+            // 检查是否是头部结束符（空行）
             if header_line.is_empty() {
                 break;
             }
@@ -165,11 +178,13 @@ impl HttpProxy {
                 if conn.has_data() {
                     let available = conn.available_bytes();
                     let take = std::cmp::min(available, len - body.len());
-                    body.extend_from_slice(&conn.read_from_buffer(take).unwrap());
-                } else {
-                    if conn.read().await? == 0 {
-                        break;
-                    }
+                    let data = match conn.read_from_buffer(take) {
+                        Some(bytes) => bytes,
+                        None => break,
+                    };
+                    body.extend_from_slice(&data);
+                } else if conn.read().await? == 0 {
+                    break;
                 }
             }
 
@@ -195,8 +210,7 @@ impl HttpProxy {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // 检查Authorization头
         if let Some(auth_header) = request.headers.get("authorization") {
-            if auth_header.starts_with("Basic ") {
-                let encoded = &auth_header[6..];
+            if let Some(encoded) = auth_header.strip_prefix("Basic ") {
                 let decoded = general_purpose::STANDARD.decode(encoded)?;
                 let credentials = String::from_utf8(decoded)?;
 
@@ -221,7 +235,7 @@ impl HttpProxy {
             .collect::<Vec<u8>>();
 
         conn.write(&response).await?;
-        return Err("Proxy authentication required".into());
+        Err("Proxy authentication required".into())
     }
 
     /// 处理CONNECT请求

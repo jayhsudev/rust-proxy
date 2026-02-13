@@ -11,31 +11,62 @@ impl Forwarder {
         conn1: &mut BufferedConnection,
         conn2: &mut BufferedConnection,
     ) -> Result<(), io::Error> {
-        // 简化版本：直接进行双向转发
-        // 由于克隆问题，使用更简单的循环方式
+        // 使用tokio的select!宏来同时监听两个连接
         loop {
-            // 从 conn1 读取并写入到 conn2
-            if conn1.has_data() || conn1.read().await? > 0 {
-                if conn1.has_data() {
-                    if let Some(data) = conn1.read_from_buffer(conn1.available_bytes()) {
-                        conn2.write_to_buffer(&data);
-                        conn2.flush().await?;
+            tokio::select! {
+                // 从conn1读取并写入到conn2
+                result = conn1.read() => {
+                    match result {
+                        Ok(0) => {
+                            // 连接关闭
+                            return Ok(());
+                        }
+                        Ok(n) => {
+                            // 有数据可读，从缓冲区读取并写入到conn2
+                            match conn1.read_from_buffer(n) {
+                                Some(data) => {
+                                    conn2.write_to_buffer(&data);
+                                    conn2.flush().await?;
+                                }
+                                None => {
+                                    // This should not happen if read() succeeded
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::UnexpectedEof,
+                                        "Buffer data mismatch"
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                // 从conn2读取并写入到conn1
+                result = conn2.read() => {
+                    match result {
+                        Ok(0) => {
+                            // 连接关闭
+                            return Ok(());
+                        }
+                        Ok(n) => {
+                            // 有数据可读，从缓冲区读取并写入到conn1
+                            match conn2.read_from_buffer(n) {
+                                Some(data) => {
+                                    conn1.write_to_buffer(&data);
+                                    conn1.flush().await?;
+                                }
+                                None => {
+                                    // This should not happen if read() succeeded
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::UnexpectedEof,
+                                        "Buffer data mismatch"
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => return Err(e),
                     }
                 }
             }
-
-            // 从 conn2 读取并写入到 conn1
-            if conn2.has_data() || conn2.read().await? > 0 {
-                if conn2.has_data() {
-                    if let Some(data) = conn2.read_from_buffer(conn2.available_bytes()) {
-                        conn1.write_to_buffer(&data);
-                        conn1.flush().await?;
-                    }
-                }
-            }
-
-            // 短暂睡眠以避免CPU占用过高
-            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         }
     }
 }

@@ -78,8 +78,11 @@ impl TcpProxy {
         }
 
         // 检查协议类型
-        let first_byte = conn.read_from_buffer(1).unwrap()[0];
-        conn.write_to_buffer(&[first_byte]); // 放回缓冲区
+        let first_byte = match conn.read_from_buffer(1) {
+            Some(bytes) => bytes[0],
+            None => return Err(TcpProxyError::NoDataReceived),
+        };
+        conn.unread(&[first_byte]); // 放回缓冲区
 
         // 根据第一个字节判断协议类型
         match first_byte {
@@ -99,7 +102,7 @@ impl TcpProxy {
                 http_proxy
                     .handle_connection(&mut conn)
                     .await
-                    .map_err(|e| TcpProxyError::ProxyError(e))?;
+                    .map_err(TcpProxyError::ProxyError)?;
             }
             // 可能是HTTP CONNECT方法或其他协议
             _ => {
@@ -110,8 +113,11 @@ impl TcpProxy {
 
                 // 检查是否是HTTP CONNECT (通常以 "CONNECT" 开头)
                 if conn.available_bytes() >= 7 {
-                    let peek_data = conn.read_from_buffer(7).unwrap();
-                    conn.write_to_buffer(&peek_data); // 放回缓冲区
+                    let peek_data = match conn.read_from_buffer(7) {
+                        Some(data) => data,
+                        None => return Err(TcpProxyError::UnsupportedProtocol),
+                    };
+                    conn.unread(&peek_data); // 放回缓冲区
 
                     if peek_data.eq_ignore_ascii_case(b"CONNECT") {
                         info!("HTTP CONNECT connection from {}", addr);
@@ -119,7 +125,7 @@ impl TcpProxy {
                         http_proxy
                             .handle_connection(&mut conn)
                             .await
-                            .map_err(|e| TcpProxyError::ProxyError(e))?;
+                            .map_err(TcpProxyError::ProxyError)?;
                         return Ok(());
                     }
                 }

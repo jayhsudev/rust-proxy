@@ -1,0 +1,16 @@
+warning: unused import: `std::error::Error`
+  --> src/common/logger.rs:14:5
+   |
+14 | use std::error::Error;
+   |     ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rust-proxy` (bin "rust-proxy") generated 1 warning (run `cargo fix --bin "rust-proxy" -p rust-proxy` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running `target/debug/rust-proxy --config test_config.toml`
+2026-02-13T15:34:18.793944+08:00 INFO rust_proxy::common::logger - Logger initialized with info level
+2026-02-13T15:34:18.794158+08:00 INFO rust_proxy::common::logger - See 'logs/test-proxy.log' for log and 'logs/archive/test-proxy-{}.log' for archived logs
+2026-02-13T15:34:18.794240+08:00 INFO rust_proxy - Rust Proxy server starting with config: Config { listen_address: "127.0.0.1:1082", users: {}, log: LoggerConfig { level: "Info", path: "logs/test-proxy.log", archive_pattern: "logs/archive/test-proxy-{}.log", file_count: 5, file_size: 10 }, buffer_size: 4096 }
+2026-02-13T15:34:18.795560+08:00 ERROR rust_proxy - Failed to bind to address 127.0.0.1:1082: Address already in use (os error 48)
+Failed to bind to address: 127.0.0.1:1082

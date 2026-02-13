@@ -3,6 +3,7 @@ use crate::common::config::Config;
 use crate::common::logger;
 use crate::proxy::tcp::TcpProxy;
 use clap::Parser;
+use log::LevelFilter;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -10,6 +11,23 @@ use tokio::runtime::Runtime;
 mod common;
 mod net;
 mod proxy;
+
+/// Simple logger that logs to stderr, used as fallback when log4rs fails
+struct SimpleLogger;
+
+impl log::Log for SimpleLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= LevelFilter::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!("[{}] {}", record.level(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
 
 // Define command line arguments structure
 #[derive(Parser, Debug)]
@@ -37,14 +55,20 @@ fn main() {
     let args = Args::parse();
 
     // Load configuration
-    let mut config = Config::from_file(&args.config).expect("Failed to load config");
+    let mut config = match Config::from_file(&args.config) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("Failed to load config from {}: {}", args.config, e);
+            std::process::exit(1);
+        }
+    };
 
     // Apply command line argument overrides
     if let Some(listen_address) = args.listen_address {
         config.listen_address = listen_address;
     }
 
-    if args.log_level != "Info" {
+    if args.log_level.to_lowercase() != config.log.level.to_lowercase() {
         config.log.level = args.log_level;
     }
 
@@ -52,29 +76,52 @@ fn main() {
         config.buffer_size = buffer_size;
     }
 
+    // Validate configuration after overrides
+    if let Err(e) = config.validate() {
+        log::error!("Invalid configuration after command line overrides: {}", e);
+        eprintln!("Invalid configuration: {}", e);
+        std::process::exit(1);
+    }
+
     // Initialize logging system
-    logger::setup_logger(config.log.clone()).expect("Failed to initialize logger");
+    if let Err(e) = logger::setup_logger(config.log.clone()) {
+        eprintln!("Failed to initialize logger: {}", e);
+        // Fallback to basic console logging
+        log::set_boxed_logger(Box::new(SimpleLogger)).unwrap();
+        log::set_max_level(LevelFilter::Info);
+    }
 
     log::info!("Rust Proxy server starting with config: {:?}", config);
 
     // Create authentication manager
-    let auth_manager = Arc::new(
-        AuthManager::new(&config.users)
-            .expect("Failed to create auth manager: invalid credentials format"),
-    );
+    let auth_manager = match AuthManager::new(&config.users) {
+        Ok(manager) => Arc::new(manager),
+        Err(e) => {
+            log::error!("Failed to create auth manager: {}", e);
+            eprintln!("Failed to create auth manager: invalid credentials format");
+            std::process::exit(1);
+        }
+    };
 
     // Create Tokio runtime
-    let rt = Runtime::new().expect("Failed to create Tokio runtime");
+    let rt = match Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            log::error!("Failed to create Tokio runtime: {}", e);
+            eprintln!("Failed to create Tokio runtime");
+            std::process::exit(1);
+        }
+    };
 
     // Start TCP listening
-    let listener = rt.block_on(async {
-        TcpListener::bind(&config.listen_address)
-            .await
-            .expect(&format!(
-                "Failed to bind to address: {}",
-                config.listen_address
-            ))
-    });
+    let listener = match rt.block_on(async { TcpListener::bind(&config.listen_address).await }) {
+        Ok(listener) => listener,
+        Err(e) => {
+            log::error!("Failed to bind to address {}: {}", config.listen_address, e);
+            eprintln!("Failed to bind to address: {}", config.listen_address);
+            std::process::exit(1);
+        }
+    };
 
     println!("Rust Proxy server listening on {}", config.listen_address);
     println!("Supporting SOCKS5 and HTTP proxy protocols");
