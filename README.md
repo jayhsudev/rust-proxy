@@ -91,6 +91,12 @@ cargo clippy
 # Set buffer size in bytes (overrides config file)
 ./rust-proxy --buffer-size 8192
 
+# Set maximum number of concurrent connections (overrides config file)
+./rust-proxy --max-connections 2048
+
+# Set connection timeout in seconds for target servers (overrides config file)
+./rust-proxy --connect-timeout 15
+
 # Show help
 ./rust-proxy --help
 
@@ -135,6 +141,8 @@ buffer_size = 4096
 | `log.file_count` | `5` | Number of archived log files to retain |
 | `log.file_size` | `10` | Max size per log file in MB |
 | `buffer_size` | `4096` | Network buffer size (1-65536 bytes) |
+| `max_connections` | `1024` | Maximum number of concurrent connections |
+| `connect_timeout` | `10` | Connection timeout in seconds for target servers |
 
 ## Client Configuration
 

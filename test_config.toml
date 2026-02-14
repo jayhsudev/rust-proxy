@@ -1,9 +1,0 @@
-listen_address = '127.0.0.1:1082'
-buffer_size = 4096
-
-[log]
-level = "Info"
-path = "logs/test-proxy.log"
-archive_pattern = "logs/archive/test-proxy-{}.log"
-file_count = 5
-file_size = 10

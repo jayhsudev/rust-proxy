@@ -91,6 +91,12 @@ cargo clippy
 # 设置缓冲区大小（字节，覆盖配置文件）
 ./rust-proxy --buffer-size 8192
 
+# 设置最大并发连接数（覆盖配置文件）
+./rust-proxy --max-connections 2048
+
+# 设置目标服务器连接超时时间（秒，覆盖配置文件）
+./rust-proxy --connect-timeout 15
+
 # 显示帮助
 ./rust-proxy --help
 
@@ -135,6 +141,8 @@ buffer_size = 4096
 | `log.file_count` | `5` | 保留的归档日志文件数量 |
 | `log.file_size` | `10` | 每个日志文件的最大大小（MB） |
 | `buffer_size` | `4096` | 网络缓冲区大小（1-65536字节） |
+| `max_connections` | `1024` | 最大并发连接数 |
+| `connect_timeout` | `10` | 目标服务器连接超时时间（秒） |
 
 ## 客户端配置
 

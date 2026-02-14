@@ -8,7 +8,7 @@ listen_address = "127.0.0.1:1080"
 # If authentication is not required, you can remove the entire [users] section
 [users]
 # Format: username = "password"
-# Passwords will be hashed using bcrypt
+# Passwords will be hashed using bcrypt at startup
 alice = "password123"
 bob = "securepass"
 
@@ -20,7 +20,7 @@ level = "Info"
 # Log file path
 path = "logs/rust-proxy.log"
 
-# Archive log file name pattern ({} will be replaced by timestamp)
+# Archive log file name pattern ({} will be replaced by index)
 archive_pattern = "logs/archive/rust-proxy-{}.log"
 
 # Number of log files to keep
@@ -32,3 +32,10 @@ file_size = 10
 # Network buffer size (bytes)
 # Recommended values: 4096, 8192, 16384
 buffer_size = 4096
+
+# Maximum number of concurrent connections
+# When the limit is reached, new connections are rejected
+max_connections = 1024
+
+# Timeout in seconds for connecting to target servers
+connect_timeout = 10

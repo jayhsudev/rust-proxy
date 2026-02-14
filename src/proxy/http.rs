@@ -1,194 +1,161 @@
 use base64::{engine::general_purpose, Engine as _};
-use std::io::{Error, ErrorKind};
-use std::net::ToSocketAddrs;
+use log::info;
 use std::sync::Arc;
-use tokio::net::TcpStream;
+use std::time::Duration;
+use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 
 use crate::common::auth::AuthManager;
 use crate::net::conn::BufferedConnection;
-use crate::proxy::forward::Forwarder;
+use crate::proxy::forward;
 
-/// HTTP请求结构
-#[derive(Debug)]
+/// HTTP proxy error types
+#[derive(Error, Debug)]
+pub enum HttpProxyError {
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+    #[error("Invalid HTTP request: {0}")]
+    InvalidRequest(String),
+    #[error("Proxy authentication required")]
+    ProxyAuthRequired,
+    #[error("Authentication failed")]
+    AuthenticationFailed(#[from] crate::common::auth::AuthError),
+    #[error("Unsupported HTTP method: {0}")]
+    UnsupportedMethod(String),
+    #[error("Invalid URL: {0}")]
+    InvalidUrl(#[from] url::ParseError),
+    #[error("Connection error: {0}")]
+    ConnectError(#[from] crate::proxy::forward::ConnectError),
+    #[error("Invalid UTF-8 data: {0}")]
+    InvalidUtf8(#[from] std::string::FromUtf8Error),
+    #[error("Invalid base64 encoding: {0}")]
+    InvalidBase64(#[from] base64::DecodeError),
+}
+
+/// A single HTTP header preserving its original name casing.
+struct HttpHeader {
+    /// Original header name (preserves case, e.g. "Content-Type")
+    name: String,
+    /// Lowercased name used for lookups
+    name_lower: String,
+    /// Header value
+    value: String,
+}
+
 struct HttpRequest {
     method: String,
     path: String,
     version: String,
-    headers: std::collections::HashMap<String, String>,
+    /// Headers stored in order, preserving original case.
+    headers: Vec<HttpHeader>,
     body: Vec<u8>,
 }
 
-/// HTTP代理
+impl HttpRequest {
+    /// Lookup a header value by name (case-insensitive).
+    fn get_header(&self, name: &str) -> Option<&str> {
+        let lower = name.to_lowercase();
+        self.headers
+            .iter()
+            .find(|h| h.name_lower == lower)
+            .map(|h| h.value.as_str())
+    }
+}
+
+const CONNECT_OK: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+const PROXY_AUTH_REQUIRED: &[u8] = b"HTTP/1.1 407 Proxy Authentication Required\r\n\
+    Proxy-Authenticate: Basic realm=\"Proxy\"\r\n\
+    Content-Length: 0\r\n\r\n";
+
+/// HTTP proxy implementation supporting CONNECT and standard HTTP methods
 pub struct HttpProxy {
-    /// 身份验证管理器
     auth_manager: Arc<AuthManager>,
+    buffer_size: usize,
+    connect_timeout: Duration,
 }
 
 impl HttpProxy {
-    /// 创建新的HTTP代理
-    pub fn new(auth_manager: Arc<AuthManager>) -> Self {
-        HttpProxy { auth_manager }
+    /// Creates a new HTTP proxy instance
+    pub fn new(
+        auth_manager: Arc<AuthManager>,
+        buffer_size: usize,
+        connect_timeout: Duration,
+    ) -> Self {
+        HttpProxy {
+            auth_manager,
+            buffer_size,
+            connect_timeout,
+        }
     }
 
-    /// 处理HTTP连接
+    /// Handles an incoming HTTP proxy connection
     pub async fn handle_connection(
-        &mut self,
+        &self,
         conn: &mut BufferedConnection,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // 1. 解析HTTP请求
+    ) -> Result<(), HttpProxyError> {
         let request = self.parse_request(conn).await?;
 
-        // 2. 处理身份验证
         if self.auth_manager.has_users() {
             self.authenticate(conn, &request).await?;
         }
 
-        // 3. 处理请求
         match request.method.as_str() {
-            "CONNECT" => {
-                // 处理HTTPS CONNECT请求
-                self.handle_connect(conn, &request).await?;
+            "CONNECT" => self.handle_connect(conn, &request).await?,
+            "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "OPTIONS" | "PATCH" => {
+                self.handle_http_request(conn, &request).await?
             }
             _ => {
-                // 处理普通HTTP请求
-                self.handle_http_request(conn, &request).await?;
+                return Err(HttpProxyError::UnsupportedMethod(request.method.clone()));
             }
         }
 
         Ok(())
     }
 
-    /// 解析HTTP请求
+    /// Parses an HTTP request from the buffered connection
     async fn parse_request(
-        &mut self,
+        &self,
         conn: &mut BufferedConnection,
-    ) -> Result<HttpRequest, Box<dyn std::error::Error>> {
-        // 读取请求行
-        let mut request_line = String::new();
-        loop {
-            // 确保有数据可读
-            if conn.available_bytes() == 0 && conn.read().await? == 0 {
-                return Err("Connection closed during request parsing".into());
-            }
-
-            // 读取一个字节
-            let byte = match conn.read_from_buffer(1) {
-                Some(bytes) => bytes[0],
-                None => return Err("Connection closed during request parsing".into()),
-            };
-            let c = byte as char;
-
-            if c == '\r' {
-                // 检查下一个字符是否是\n
-                if conn.available_bytes() == 0 && conn.read().await? == 0 {
-                    return Err("Connection closed during request parsing".into());
-                }
-                let next_byte = match conn.read_from_buffer(1) {
-                    Some(bytes) => bytes[0],
-                    None => return Err("Connection closed during request parsing".into()),
-                };
-                if next_byte as char == '\n' {
-                    // 找到行结束符\r\n
-                    break;
-                } else {
-                    // 不是\n，把两个字符都加入
-                    request_line.push(c);
-                    request_line.push(next_byte as char);
-                }
-            } else if c == '\n' {
-                // 只有\n，也认为是行结束（兼容处理）
-                break;
-            } else {
-                request_line.push(c);
-            }
-        }
-
-        // 解析请求行
+    ) -> Result<HttpRequest, HttpProxyError> {
+        let request_line = conn.read_line().await?;
         let parts: Vec<&str> = request_line.split_whitespace().collect();
         if parts.len() < 3 {
-            return Err("Invalid HTTP request line".into());
+            return Err(HttpProxyError::InvalidRequest(
+                "Invalid HTTP request line".to_string(),
+            ));
         }
 
         let method = parts[0].to_string();
         let path = parts[1].to_string();
         let version = parts[2].to_string();
 
-        // 解析请求头
-        let mut headers = std::collections::HashMap::new();
+        let mut headers = Vec::new();
         loop {
-            let mut header_line = String::new();
-
-            loop {
-                // 确保有数据可读
-                if conn.available_bytes() == 0 && conn.read().await? == 0 {
-                    return Err("Connection closed during header parsing".into());
-                }
-
-                // 读取一个字节
-                let byte = match conn.read_from_buffer(1) {
-                    Some(bytes) => bytes[0],
-                    None => return Err("Connection closed during header parsing".into()),
-                };
-                let c = byte as char;
-
-                if c == '\r' {
-                    // 检查下一个字符是否是\n
-                    if conn.available_bytes() == 0 && conn.read().await? == 0 {
-                        return Err("Connection closed during header parsing".into());
-                    }
-                    let next_byte = match conn.read_from_buffer(1) {
-                        Some(bytes) => bytes[0],
-                        None => return Err("Connection closed during header parsing".into()),
-                    };
-                    if next_byte as char == '\n' {
-                        // 找到行结束符\r\n
-                        break;
-                    } else {
-                        // 不是\n，把两个字符都加入
-                        header_line.push(c);
-                        header_line.push(next_byte as char);
-                    }
-                } else if c == '\n' {
-                    // 只有\n，也认为是行结束（兼容处理）
-                    break;
-                } else {
-                    header_line.push(c);
-                }
-            }
-
-            // 检查是否是头部结束符（空行）
-            if header_line.is_empty() {
+            let line = conn.read_line().await?;
+            if line.is_empty() {
                 break;
             }
-
-            // 解析头部行
-            if let Some(colon_pos) = header_line.find(':') {
-                let name = header_line[..colon_pos].trim().to_lowercase();
-                let value = header_line[colon_pos + 1..].trim().to_string();
-                headers.insert(name, value);
+            if let Some(colon_pos) = line.find(':') {
+                let name = line[..colon_pos].trim().to_string();
+                let name_lower = name.to_lowercase();
+                let value = line[colon_pos + 1..].trim().to_string();
+                headers.push(HttpHeader {
+                    name,
+                    name_lower,
+                    value,
+                });
             }
         }
 
-        // 读取请求体（如果有）
-        let body = if let Some(content_length) = headers.get("content-length") {
-            let len = content_length.parse::<usize>()?;
-            let mut body = Vec::with_capacity(len);
-
-            while body.len() < len {
-                if conn.has_data() {
-                    let available = conn.available_bytes();
-                    let take = std::cmp::min(available, len - body.len());
-                    let data = match conn.read_from_buffer(take) {
-                        Some(bytes) => bytes,
-                        None => break,
-                    };
-                    body.extend_from_slice(&data);
-                } else if conn.read().await? == 0 {
-                    break;
-                }
-            }
-
-            body
+        let body = if let Some(content_length) = headers
+            .iter()
+            .find(|h| h.name_lower == "content-length")
+            .map(|h| h.value.as_str())
+        {
+            let len = content_length.parse::<usize>().map_err(|_| {
+                HttpProxyError::InvalidRequest("Invalid Content-Length".to_string())
+            })?;
+            conn.read_exact_bytes(len).await?
         } else {
             Vec::new()
         };
@@ -202,14 +169,13 @@ impl HttpProxy {
         })
     }
 
-    /// 处理身份验证
+    /// Handles proxy authentication
     async fn authenticate(
-        &mut self,
+        &self,
         conn: &mut BufferedConnection,
         request: &HttpRequest,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // 检查Authorization头
-        if let Some(auth_header) = request.headers.get("authorization") {
+    ) -> Result<(), HttpProxyError> {
+        if let Some(auth_header) = request.get_header("proxy-authorization") {
             if let Some(encoded) = auth_header.strip_prefix("Basic ") {
                 let decoded = general_purpose::STANDARD.decode(encoded)?;
                 let credentials = String::from_utf8(decoded)?;
@@ -218,133 +184,98 @@ impl HttpProxy {
                     let username = &credentials[..colon_pos];
                     let password = &credentials[colon_pos + 1..];
 
-                    if self.auth_manager.authenticate(username, password)? {
-                        return Ok(());
+                    match self.auth_manager.authenticate(username, password).await {
+                        Ok(true) => return Ok(()),
+                        Ok(false) => {
+                            // Wrong credentials – fall through to send 407
+                        }
+                        Err(e) => {
+                            conn.write(PROXY_AUTH_REQUIRED).await?;
+                            return Err(HttpProxyError::AuthenticationFailed(e));
+                        }
                     }
                 }
             }
         }
 
-        // 认证失败，发送407响应
-        let response = b"HTTP/1.1 407 Proxy Authentication Required\r\n"
-            .iter()
-            .chain(b"Proxy-Authenticate: Basic realm=\"WProxy\"\r\n")
-            .chain(b"Content-Length: 0\r\n")
-            .chain(b"\r\n")
-            .cloned()
-            .collect::<Vec<u8>>();
-
-        conn.write(&response).await?;
-        Err("Proxy authentication required".into())
+        conn.write(PROXY_AUTH_REQUIRED).await?;
+        Err(HttpProxyError::ProxyAuthRequired)
     }
 
-    /// 处理CONNECT请求
+    /// Handles CONNECT method to create a TCP tunnel
     async fn handle_connect(
-        &mut self,
+        &self,
         conn: &mut BufferedConnection,
         request: &HttpRequest,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // 解析目标地址
-        let target_addr =
-            request.path.to_socket_addrs()?.next().ok_or_else(|| {
-                Error::new(ErrorKind::NotFound, "Could not resolve target address")
-            })?;
+    ) -> Result<(), HttpProxyError> {
+        let target_stream =
+            forward::connect_with_timeout(&request.path, self.connect_timeout).await?;
 
-        // 连接目标服务器
-        let target_stream = TcpStream::connect(target_addr).await.map_err(|e| {
-            Error::new(
-                ErrorKind::ConnectionRefused,
-                format!("Failed to connect to target: {}", e),
-            )
-        })?;
+        conn.write(CONNECT_OK).await?;
+        info!("CONNECT tunnel to {}", request.path);
 
-        // 发送连接成功响应
-        let response = b"HTTP/1.1 200 Connection Established\r\n"
-            .iter()
-            .chain(b"Content-Length: 0\r\n")
-            .chain(b"\r\n")
-            .cloned()
-            .collect::<Vec<u8>>();
-
-        conn.write(&response).await?;
-
-        // 数据转发
-        let mut target_conn = BufferedConnection::new(target_stream, 4096);
-        Forwarder::forward_between(conn, &mut target_conn).await?;
+        let mut target_conn = BufferedConnection::new(target_stream, self.buffer_size);
+        forward::forward_bidirectional(conn, &mut target_conn).await?;
 
         Ok(())
     }
 
-    /// 处理普通HTTP请求
+    /// Handles standard HTTP requests (GET, POST, PUT, etc.)
     async fn handle_http_request(
-        &mut self,
+        &self,
         conn: &mut BufferedConnection,
         request: &HttpRequest,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // 解析URL
+    ) -> Result<(), HttpProxyError> {
         let url = url::Url::parse(&request.path)?;
         let host = url
             .host_str()
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "No host in URL"))?;
+            .ok_or_else(|| HttpProxyError::InvalidRequest("No host in URL".to_string()))?;
         let port = url
             .port_or_known_default()
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "No port in URL"))?;
+            .ok_or_else(|| HttpProxyError::InvalidRequest("No port in URL".to_string()))?;
 
-        // 连接目标服务器
-        let target_addr = (host, port)
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| Error::new(ErrorKind::NotFound, "Could not resolve target address"))?;
+        let target_addr = format!("{}:{}", host, port);
+        let target_stream =
+            forward::connect_with_timeout(&target_addr, self.connect_timeout).await?;
 
-        let target_stream = TcpStream::connect(target_addr).await.map_err(|e| {
-            Error::new(
-                ErrorKind::ConnectionRefused,
-                format!("Failed to connect to target: {}", e),
-            )
-        })?;
+        let mut target_conn = BufferedConnection::new(target_stream, self.buffer_size);
 
-        // 创建目标连接
-        let mut target_conn = BufferedConnection::new(target_stream, 4096);
-
-        // 重写请求行（使用相对路径）
-        let relative_path = if url.path() == "/" && url.query().is_none() {
-            "/".to_string()
-        } else if url.query().is_none() {
-            url.path().to_string()
-        } else {
-            format!("{}?{}", url.path(), url.query().unwrap())
+        let relative_path = match url.query() {
+            None => url.path().to_string(),
+            Some(q) => format!("{}?{}", url.path(), q),
         };
 
-        let request_line = format!(
-            "{} {} {}\r\n",
-            request.method, relative_path, request.version
+        let mut request_data = Vec::new();
+        request_data.extend_from_slice(
+            format!(
+                "{} {} {}\r\n",
+                request.method, relative_path, request.version
+            )
+            .as_bytes(),
         );
-        target_conn.write_to_buffer(request_line.as_bytes());
 
-        // 转发请求头（移除Proxy-*头）
-        for (name, value) in &request.headers {
-            if !name.starts_with("proxy-") && name != "connection" {
-                let header_line = format!("{}: {}\r\n", name, value);
-                target_conn.write_to_buffer(header_line.as_bytes());
+        // Forward headers preserving original order and case,
+        // skipping hop-by-hop proxy headers.
+        for header in &request.headers {
+            if !header.name_lower.starts_with("proxy-") && header.name_lower != "connection" {
+                request_data
+                    .extend_from_slice(format!("{}: {}\r\n", header.name, header.value).as_bytes());
             }
         }
+        request_data.extend_from_slice(b"Connection: close\r\n\r\n");
 
-        // 添加Connection: close头
-        target_conn.write_to_buffer(b"Connection: close\r\n");
-
-        // 结束请求头
-        target_conn.write_to_buffer(b"\r\n");
-
-        // 转发请求体
         if !request.body.is_empty() {
-            target_conn.write_to_buffer(&request.body);
+            request_data.extend_from_slice(&request.body);
         }
 
-        // 刷新缓冲区
-        target_conn.flush().await?;
+        target_conn.write(&request_data).await?;
+        info!("HTTP {} {}", request.method, request.path);
 
-        // 数据转发
-        Forwarder::forward_between(&mut target_conn, conn).await?;
+        // For non-CONNECT requests the full request has already been sent.
+        // Only copy the response back (target → client) instead of using
+        // bidirectional forwarding which could mis-forward pipelined data.
+        tokio::io::copy(&mut target_conn, conn).await?;
+        conn.shutdown().await?;
 
         Ok(())
     }

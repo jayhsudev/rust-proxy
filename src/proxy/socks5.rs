@@ -1,238 +1,181 @@
 use log::info;
 use std::io;
-use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
-use tokio::net::TcpStream;
 
 use crate::common::auth::{AuthError, AuthManager};
 use crate::net::conn::BufferedConnection;
-use crate::proxy::forward::Forwarder;
+use crate::proxy::forward;
 
-/// SOCKS5代理错误
+/// SOCKS5 proxy error types
 #[derive(Error, Debug)]
 pub enum Socks5ProxyError {
     #[error("IO error: {0}")]
     IoError(#[from] io::Error),
-    #[error("Invalid SOCKS version")]
-    InvalidVersion,
+    #[error("Invalid SOCKS version: {0:#04x}")]
+    InvalidVersion(u8),
     #[error("No supported authentication method")]
     NoSupportedAuthMethod,
-    #[error("Invalid authentication method")]
-    InvalidAuthMethod,
+    #[error("Invalid authentication sub-negotiation version: {0:#04x}")]
+    InvalidAuthVersion(u8),
     #[error("Authentication failed")]
     AuthenticationFailed(#[from] AuthError),
-    #[error("Connection closed during {0}")]
-    ConnectionClosed(&'static str),
-    #[error("Unsupported command")]
-    UnsupportedCommand,
-    #[error("Invalid address type")]
-    InvalidAddressType,
-    #[error("Failed to connect to target: {0}")]
-    ConnectTargetFailed(io::Error),
+    #[error("Unsupported command: {0:#04x}")]
+    UnsupportedCommand(u8),
+    #[error("Invalid address type: {0:#04x}")]
+    InvalidAddressType(u8),
+    #[error("Connection error: {0}")]
+    ConnectError(#[from] crate::proxy::forward::ConnectError),
     #[error("Invalid UTF-8 data")]
     InvalidUtf8(#[from] std::string::FromUtf8Error),
-    #[error("Failed to resolve address: {0}")]
-    AddressResolutionFailed(String),
 }
 
-/// SOCKS5代理
+// SOCKS5 reply codes (RFC 1928 Section 6)
+const REPLY_SUCCEEDED: u8 = 0x00;
+const REPLY_GENERAL_FAILURE: u8 = 0x01;
+const REPLY_HOST_UNREACHABLE: u8 = 0x04;
+const REPLY_CONNECTION_REFUSED: u8 = 0x05;
+const REPLY_COMMAND_NOT_SUPPORTED: u8 = 0x07;
+const REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 0x08;
+
+/// SOCKS5 proxy implementation supporting CONNECT command and username/password authentication
 pub struct Socks5Proxy {
-    /// 身份验证管理器
     auth_manager: Arc<AuthManager>,
+    connect_timeout: Duration,
 }
 
 impl Socks5Proxy {
-    /// 创建新的SOCKS5代理
-    pub fn new(auth_manager: Arc<AuthManager>) -> Self {
-        Socks5Proxy { auth_manager }
+    /// Creates a new SOCKS5 proxy instance
+    pub fn new(auth_manager: Arc<AuthManager>, connect_timeout: Duration) -> Self {
+        Socks5Proxy {
+            auth_manager,
+            connect_timeout,
+        }
     }
 
-    /// 处理SOCKS5连接
+    /// Handles an incoming SOCKS5 proxy connection
     pub async fn handle_connection(
-        &mut self,
+        &self,
         conn: &mut BufferedConnection,
     ) -> Result<(), Socks5ProxyError> {
         info!("Handling SOCKS5 connection");
 
-        // 1. 握手阶段
         let selected_method = self.handshake(conn).await?;
 
-        // 2. 认证阶段 (only if method 0x02 selected)
         if selected_method == 0x02 {
             self.authenticate(conn).await?;
         }
 
-        // 3. 请求阶段
-        let target_addr = self.handle_request(conn).await?;
+        let target_addr_str = match self.handle_request(conn).await {
+            Ok(addr) => addr,
+            Err(e) => {
+                let reply_code = match &e {
+                    Socks5ProxyError::UnsupportedCommand(_) => REPLY_COMMAND_NOT_SUPPORTED,
+                    Socks5ProxyError::InvalidAddressType(_) => REPLY_ADDRESS_TYPE_NOT_SUPPORTED,
+                    _ => REPLY_GENERAL_FAILURE,
+                };
+                let _ = self.send_reply(conn, reply_code).await;
+                return Err(e);
+            }
+        };
 
-        // 4. 连接目标服务器
-        let target_stream = TcpStream::connect(target_addr)
-            .await
-            .map_err(Socks5ProxyError::ConnectTargetFailed)?;
+        let target_stream =
+            match forward::connect_with_timeout(&target_addr_str, self.connect_timeout).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    let reply_code = match &e {
+                        forward::ConnectError::ConnectionTimeout => REPLY_GENERAL_FAILURE,
+                        forward::ConnectError::ConnectionRefused(_) => REPLY_CONNECTION_REFUSED,
+                        forward::ConnectError::AddressResolutionFailed(_) => REPLY_HOST_UNREACHABLE,
+                        _ => REPLY_GENERAL_FAILURE,
+                    };
+                    let _ = self.send_reply(conn, reply_code).await;
+                    return Err(Socks5ProxyError::ConnectError(e));
+                }
+            };
 
-        info!("Connected to target server: {}", target_addr);
+        info!("Connected to target: {}", target_addr_str);
 
-        // 5. 发送连接成功响应
-        self.send_connection_success(conn).await?;
+        self.send_reply(conn, REPLY_SUCCEEDED).await?;
 
-        // 6. 数据转发
-        // 使用与客户端连接相同的缓冲区大小
         let buffer_size = conn.buffer_size();
         let mut target_conn = BufferedConnection::new(target_stream, buffer_size);
-        Forwarder::forward_between(conn, &mut target_conn)
+        forward::forward_bidirectional(conn, &mut target_conn)
             .await
             .map_err(Socks5ProxyError::IoError)?;
 
         Ok(())
     }
 
-    /// 握手阶段
-    async fn handshake(&mut self, conn: &mut BufferedConnection) -> Result<u8, Socks5ProxyError> {
-        // 确保有足够的数据
-        while conn.available_bytes() < 2 {
-            if conn.read().await? == 0 {
-                return Err(Socks5ProxyError::ConnectionClosed("handshake"));
-            }
-        }
+    /// Performs SOCKS5 handshake to negotiate authentication method
+    async fn handshake(&self, conn: &mut BufferedConnection) -> Result<u8, Socks5ProxyError> {
+        let header = conn.read_exact_bytes(2).await?;
+        let version = header[0];
+        let nmethods = header[1] as usize;
 
-        // 读取版本号和认证方法数量
-        let version = match conn.read_from_buffer(1) {
-            Some(bytes) => bytes[0],
-            None => return Err(Socks5ProxyError::ConnectionClosed("handshake")),
-        };
-        let nmethods = match conn.read_from_buffer(1) {
-            Some(bytes) => bytes[0] as usize,
-            None => return Err(Socks5ProxyError::ConnectionClosed("handshake")),
-        };
-
-        // 验证版本号
         if version != 0x05 {
-            return Err(Socks5ProxyError::InvalidVersion);
+            return Err(Socks5ProxyError::InvalidVersion(version));
         }
 
-        // 确保有足够的数据
-        while conn.available_bytes() < nmethods {
-            if conn.read().await? == 0 {
-                return Err(Socks5ProxyError::ConnectionClosed("handshake"));
+        let methods = conn.read_exact_bytes(nmethods).await?;
+
+        let selected_method = if self.auth_manager.has_users() {
+            // Authentication is required – prefer method 0x02
+            if methods.contains(&0x02) {
+                info!("Selected username/password authentication");
+                0x02
+            } else {
+                conn.write(&[0x05, 0xFF]).await?;
+                return Err(Socks5ProxyError::NoSupportedAuthMethod);
             }
-        }
-
-        // 读取所有认证方法
-        let methods = match conn.read_from_buffer(nmethods) {
-            Some(data) => data,
-            None => return Err(Socks5ProxyError::ConnectionClosed("handshake")),
+        } else {
+            // No authentication required – prefer 0x00, but also accept 0x02
+            if methods.contains(&0x00) {
+                info!("Selected no authentication");
+                0x00
+            } else if methods.contains(&0x02) {
+                info!("Selected username/password authentication (no auth required, client will pass)");
+                0x02
+            } else {
+                conn.write(&[0x05, 0xFF]).await?;
+                return Err(Socks5ProxyError::NoSupportedAuthMethod);
+            }
         };
 
-        // 检查是否支持无认证或用户名密码认证
-        let mut selected_method = 0xFF; // 不支持的方法
-
-        if methods.contains(&0x00) && !self.auth_manager.has_users() {
-            // 无认证
-            selected_method = 0x00;
-            info!("Selected SOCKS5 no authentication");
-        } else if methods.contains(&0x02) && self.auth_manager.has_users() {
-            // 用户名密码认证
-            selected_method = 0x02;
-            info!("Selected SOCKS5 username/password authentication");
-        }
-
-        // 发送选择的认证方法
-        let response = vec![0x05, selected_method];
-        conn.write(&response).await?;
-
-        if selected_method == 0xFF {
-            return Err(Socks5ProxyError::NoSupportedAuthMethod);
-        }
-
+        conn.write(&[0x05, selected_method]).await?;
         Ok(selected_method)
     }
 
-    /// 认证阶段
-    async fn authenticate(
-        &mut self,
-        conn: &mut BufferedConnection,
-    ) -> Result<(), Socks5ProxyError> {
-        // 确保有足够的数据
-        while conn.available_bytes() < 2 {
-            if conn.read().await? == 0 {
-                return Err(Socks5ProxyError::ConnectionClosed("authentication"));
+    /// RFC 1929: Username/Password sub-negotiation
+    /// +----+------+----------+------+----------+
+    /// |VER | ULEN |  UNAME   | PLEN |  PASSWD  |
+    /// +----+------+----------+------+----------+
+    /// | 1  |  1   | 1 to 255 |  1   | 1 to 255 |
+    /// +----+------+----------+------+----------+
+    async fn authenticate(&self, conn: &mut BufferedConnection) -> Result<(), Socks5ProxyError> {
+        let header = conn.read_exact_bytes(2).await?;
+        let auth_version = header[0];
+        let username_len = header[1] as usize;
+
+        if auth_version != 0x01 {
+            return Err(Socks5ProxyError::InvalidAuthVersion(auth_version));
+        }
+
+        let username = String::from_utf8(conn.read_exact_bytes(username_len).await?)?;
+        let password_len = conn.read_exact_bytes(1).await?[0] as usize;
+        let password = String::from_utf8(conn.read_exact_bytes(password_len).await?)?;
+
+        let auth_success = match self.auth_manager.authenticate(&username, &password).await {
+            Ok(result) => result,
+            Err(e) => {
+                conn.write(&[0x01, 0x01]).await?;
+                return Err(Socks5ProxyError::AuthenticationFailed(e));
             }
-        }
-
-        // 读取认证版本和方法
-        let auth_version = match conn.read_from_buffer(1) {
-            Some(bytes) => bytes[0],
-            None => return Err(Socks5ProxyError::ConnectionClosed("authentication")),
-        };
-        let auth_method = match conn.read_from_buffer(1) {
-            Some(bytes) => bytes[0],
-            None => return Err(Socks5ProxyError::ConnectionClosed("authentication")),
         };
 
-        if auth_version != 0x01 || auth_method != 0x02 {
-            return Err(Socks5ProxyError::InvalidAuthMethod);
-        }
-
-        // 读取用户名长度
-        while conn.available_bytes() < 1 {
-            if conn.read().await? == 0 {
-                return Err(Socks5ProxyError::ConnectionClosed("authentication"));
-            }
-        }
-
-        let username_len = match conn.read_from_buffer(1) {
-            Some(bytes) => bytes[0] as usize,
-            None => return Err(Socks5ProxyError::ConnectionClosed("authentication")),
-        };
-
-        // 读取用户名
-        while conn.available_bytes() < username_len {
-            if conn.read().await? == 0 {
-                return Err(Socks5ProxyError::ConnectionClosed("authentication"));
-            }
-        }
-
-        let username = match conn.read_from_buffer(username_len) {
-            Some(data) => String::from_utf8(data)?,
-            None => return Err(Socks5ProxyError::ConnectionClosed("authentication")),
-        };
-
-        // 读取密码长度
-        while conn.available_bytes() < 1 {
-            if conn.read().await? == 0 {
-                return Err(Socks5ProxyError::ConnectionClosed("authentication"));
-            }
-        }
-
-        let password_len = match conn.read_from_buffer(1) {
-            Some(bytes) => bytes[0] as usize,
-            None => return Err(Socks5ProxyError::ConnectionClosed("authentication")),
-        };
-
-        // 读取密码
-        while conn.available_bytes() < password_len {
-            if conn.read().await? == 0 {
-                return Err(Socks5ProxyError::ConnectionClosed("authentication"));
-            }
-        }
-
-        let password = match conn.read_from_buffer(password_len) {
-            Some(data) => String::from_utf8(data)?,
-            None => return Err(Socks5ProxyError::ConnectionClosed("authentication")),
-        };
-
-        // 验证用户名和密码
-        let auth_success = self.auth_manager.authenticate(&username, &password)?;
-
-        // 发送认证结果
-        let response = if auth_success {
-            vec![0x01, 0x00]
-        } else {
-            vec![0x01, 0x01]
-        };
-
-        conn.write(&response).await?;
+        let status = if auth_success { 0x00 } else { 0x01 };
+        conn.write(&[0x01, status]).await?;
 
         if !auth_success {
             return Err(Socks5ProxyError::AuthenticationFailed(
@@ -240,169 +183,75 @@ impl Socks5Proxy {
             ));
         }
 
-        info!("User {} authenticated successfully", username);
+        info!("User '{}' authenticated", username);
         Ok(())
     }
 
-    /// 处理请求
+    /// Handles SOCKS5 request parsing and validation, returns address string
     async fn handle_request(
-        &mut self,
+        &self,
         conn: &mut BufferedConnection,
-    ) -> Result<SocketAddr, Socks5ProxyError> {
-        // 确保有足够的数据
-        while conn.available_bytes() < 4 {
-            if conn.read().await? == 0 {
-                return Err(Socks5ProxyError::ConnectionClosed("request"));
-            }
-        }
+    ) -> Result<String, Socks5ProxyError> {
+        let header = conn.read_exact_bytes(4).await?;
+        let version = header[0];
+        let command = header[1];
+        let addr_type = header[3];
 
-        // 读取版本、命令、保留字段和地址类型
-        let version = match conn.read_from_buffer(1) {
-            Some(bytes) => bytes[0],
-            None => return Err(Socks5ProxyError::ConnectionClosed("request")),
-        };
-        let command = match conn.read_from_buffer(1) {
-            Some(bytes) => bytes[0],
-            None => return Err(Socks5ProxyError::ConnectionClosed("request")),
-        };
-        let _reserved = match conn.read_from_buffer(1) {
-            Some(bytes) => bytes[0],
-            None => return Err(Socks5ProxyError::ConnectionClosed("request")),
-        };
-        let addr_type = match conn.read_from_buffer(1) {
-            Some(bytes) => bytes[0],
-            None => return Err(Socks5ProxyError::ConnectionClosed("request")),
-        };
-
-        // 验证版本和命令
         if version != 0x05 {
-            return Err(Socks5ProxyError::InvalidVersion);
+            return Err(Socks5ProxyError::InvalidVersion(version));
         }
 
         if command != 0x01 {
-            // 只支持CONNECT命令
-            return Err(Socks5ProxyError::UnsupportedCommand);
+            return Err(Socks5ProxyError::UnsupportedCommand(command));
         }
 
-        // 解析目标地址
-        let target_addr = match addr_type {
+        let addr_str = match addr_type {
             0x01 => {
-                // IPv4地址
-                while conn.available_bytes() < 6 {
-                    if conn.read().await? == 0 {
-                        return Err(Socks5ProxyError::ConnectionClosed("request"));
-                    }
-                }
-
-                let addr_bytes = match conn.read_from_buffer(4) {
-                    Some(data) => data,
-                    None => return Err(Socks5ProxyError::ConnectionClosed("request")),
-                };
-                let port_bytes = match conn.read_from_buffer(2) {
-                    Some(data) => data,
-                    None => return Err(Socks5ProxyError::ConnectionClosed("request")),
-                };
+                let data = conn.read_exact_bytes(4).await?;
+                let port_bytes = conn.read_exact_bytes(2).await?;
                 let port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
-
-                SocketAddr::new(
-                    std::net::Ipv4Addr::new(
-                        addr_bytes[0],
-                        addr_bytes[1],
-                        addr_bytes[2],
-                        addr_bytes[3],
-                    )
-                    .into(),
-                    port,
-                )
+                format!("{}.{}.{}.{}:{}", data[0], data[1], data[2], data[3], port)
             }
             0x03 => {
-                // 域名
-                while conn.available_bytes() < 1 {
-                    if conn.read().await? == 0 {
-                        return Err(Socks5ProxyError::ConnectionClosed("request"));
-                    }
-                }
-
-                let domain_len = match conn.read_from_buffer(1) {
-                    Some(bytes) => bytes[0] as usize,
-                    None => return Err(Socks5ProxyError::ConnectionClosed("request")),
-                };
-
-                while conn.available_bytes() < (domain_len + 2) {
-                    if conn.read().await? == 0 {
-                        return Err(Socks5ProxyError::ConnectionClosed("request"));
-                    }
-                }
-
-                let domain = match conn.read_from_buffer(domain_len) {
-                    Some(data) => String::from_utf8(data)?,
-                    None => return Err(Socks5ProxyError::ConnectionClosed("request")),
-                };
-                let port_bytes = match conn.read_from_buffer(2) {
-                    Some(data) => data,
-                    None => return Err(Socks5ProxyError::ConnectionClosed("request")),
-                };
+                let domain_len = conn.read_exact_bytes(1).await?[0] as usize;
+                let domain_bytes = conn.read_exact_bytes(domain_len).await?;
+                let domain = String::from_utf8(domain_bytes)?;
+                let port_bytes = conn.read_exact_bytes(2).await?;
                 let port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
-
-                // 解析域名
-                (domain.as_str(), port)
-                    .to_socket_addrs()
-                    .map_err(|_| Socks5ProxyError::AddressResolutionFailed(domain.clone()))?
-                    .next()
-                    .ok_or(Socks5ProxyError::AddressResolutionFailed(domain))?
+                format!("{}:{}", domain, port)
             }
             0x04 => {
-                // IPv6地址
-                while conn.available_bytes() < 18 {
-                    if conn.read().await? == 0 {
-                        return Err(Socks5ProxyError::ConnectionClosed("request"));
-                    }
-                }
-
-                let addr_bytes = match conn.read_from_buffer(16) {
-                    Some(data) => data,
-                    None => return Err(Socks5ProxyError::ConnectionClosed("request")),
-                };
-                let port_bytes = match conn.read_from_buffer(2) {
-                    Some(data) => data,
-                    None => return Err(Socks5ProxyError::ConnectionClosed("request")),
-                };
+                let data = conn.read_exact_bytes(16).await?;
+                let port_bytes = conn.read_exact_bytes(2).await?;
                 let port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
-
-                SocketAddr::new(
-                    std::net::Ipv6Addr::new(
-                        u16::from_be_bytes([addr_bytes[0], addr_bytes[1]]),
-                        u16::from_be_bytes([addr_bytes[2], addr_bytes[3]]),
-                        u16::from_be_bytes([addr_bytes[4], addr_bytes[5]]),
-                        u16::from_be_bytes([addr_bytes[6], addr_bytes[7]]),
-                        u16::from_be_bytes([addr_bytes[8], addr_bytes[9]]),
-                        u16::from_be_bytes([addr_bytes[10], addr_bytes[11]]),
-                        u16::from_be_bytes([addr_bytes[12], addr_bytes[13]]),
-                        u16::from_be_bytes([addr_bytes[14], addr_bytes[15]]),
-                    )
-                    .into(),
-                    port,
-                )
+                let ip = std::net::Ipv6Addr::new(
+                    u16::from_be_bytes([data[0], data[1]]),
+                    u16::from_be_bytes([data[2], data[3]]),
+                    u16::from_be_bytes([data[4], data[5]]),
+                    u16::from_be_bytes([data[6], data[7]]),
+                    u16::from_be_bytes([data[8], data[9]]),
+                    u16::from_be_bytes([data[10], data[11]]),
+                    u16::from_be_bytes([data[12], data[13]]),
+                    u16::from_be_bytes([data[14], data[15]]),
+                );
+                format!("[{}]:{}", ip, port)
             }
-            _ => {
-                return Err(Socks5ProxyError::InvalidAddressType);
-            }
+            _ => return Err(Socks5ProxyError::InvalidAddressType(addr_type)),
         };
 
-        Ok(target_addr)
+        Ok(addr_str)
     }
 
-    /// 发送连接成功响应
-    async fn send_connection_success(
-        &mut self,
+    /// Sends SOCKS5 reply with the given status code
+    async fn send_reply(
+        &self,
         conn: &mut BufferedConnection,
+        reply_code: u8,
     ) -> Result<(), Socks5ProxyError> {
-        // 响应格式: 版本(1字节) + 响应码(1字节) + 保留字段(1字节) + 地址类型(1字节) + 绑定地址(可变) + 绑定端口(2字节)
-        // 这里使用0.0.0.0:0作为绑定地址和端口
-        let response = vec![0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-
-        conn.write(&response).await?;
-        info!("Sent connection success response");
+        conn.write(&[
+            0x05, reply_code, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ])
+        .await?;
         Ok(())
     }
 }

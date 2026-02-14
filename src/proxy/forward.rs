@@ -1,72 +1,56 @@
-use std::io;
+use std::time::Duration;
+use tokio::io;
+use tokio::net::TcpStream;
+use tokio::time::timeout;
 
 use crate::net::conn::BufferedConnection;
 
-/// 数据转发器
-pub struct Forwarder;
+/// Error types for connection operations
+#[derive(Debug, thiserror::Error)]
+pub enum ConnectError {
+    #[error("IO error: {0}")]
+    IoError(#[from] io::Error),
+    #[error("Failed to resolve address: {0}")]
+    AddressResolutionFailed(String),
+    #[error("Connection timed out")]
+    ConnectionTimeout,
+    #[error("Connection refused: {0}")]
+    ConnectionRefused(String),
+    #[error("Target address not found")]
+    AddressNotFound,
+}
 
-impl Forwarder {
-    /// 在两个连接之间转发数据
-    pub async fn forward_between(
-        conn1: &mut BufferedConnection,
-        conn2: &mut BufferedConnection,
-    ) -> Result<(), io::Error> {
-        // 使用tokio的select!宏来同时监听两个连接
-        loop {
-            tokio::select! {
-                // 从conn1读取并写入到conn2
-                result = conn1.read() => {
-                    match result {
-                        Ok(0) => {
-                            // 连接关闭
-                            return Ok(());
-                        }
-                        Ok(n) => {
-                            // 有数据可读，从缓冲区读取并写入到conn2
-                            match conn1.read_from_buffer(n) {
-                                Some(data) => {
-                                    conn2.write_to_buffer(&data);
-                                    conn2.flush().await?;
-                                }
-                                None => {
-                                    // This should not happen if read() succeeded
-                                    return Err(io::Error::new(
-                                        io::ErrorKind::UnexpectedEof,
-                                        "Buffer data mismatch"
-                                    ));
-                                }
-                            }
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                // 从conn2读取并写入到conn1
-                result = conn2.read() => {
-                    match result {
-                        Ok(0) => {
-                            // 连接关闭
-                            return Ok(());
-                        }
-                        Ok(n) => {
-                            // 有数据可读，从缓冲区读取并写入到conn1
-                            match conn2.read_from_buffer(n) {
-                                Some(data) => {
-                                    conn1.write_to_buffer(&data);
-                                    conn1.flush().await?;
-                                }
-                                None => {
-                                    // This should not happen if read() succeeded
-                                    return Err(io::Error::new(
-                                        io::ErrorKind::UnexpectedEof,
-                                        "Buffer data mismatch"
-                                    ));
-                                }
-                            }
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-        }
-    }
+/// Resolve a host:port address to a SocketAddr
+pub async fn resolve_address(addr: &str) -> Result<std::net::SocketAddr, ConnectError> {
+    tokio::net::lookup_host(addr)
+        .await
+        .map_err(|e| ConnectError::AddressResolutionFailed(e.to_string()))?
+        .next()
+        .ok_or(ConnectError::AddressNotFound)
+}
+
+/// Connect to a target address with timeout
+pub async fn connect_with_timeout(
+    addr: &str,
+    connect_timeout: Duration,
+) -> Result<TcpStream, ConnectError> {
+    let target_addr = resolve_address(addr).await?;
+    timeout(connect_timeout, TcpStream::connect(target_addr))
+        .await
+        .map_err(|_| ConnectError::ConnectionTimeout)?
+        .map_err(|e| ConnectError::ConnectionRefused(e.to_string()))
+}
+
+/// Bidirectional data forwarding between two connections using zero-copy I/O.
+pub async fn forward_bidirectional(
+    conn1: &mut BufferedConnection,
+    conn2: &mut BufferedConnection,
+) -> io::Result<()> {
+    let (c2s, s2c) = tokio::io::copy_bidirectional(conn1, conn2).await?;
+    log::debug!(
+        "Forwarded {} bytes client->target, {} bytes target->client",
+        c2s,
+        s2c,
+    );
+    Ok(())
 }
