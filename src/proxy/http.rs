@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use log::info;
 use std::sync::Arc;
 use std::time::Duration;
@@ -163,22 +163,22 @@ impl HttpProxy {
         conn: &mut BufferedConnection,
         request: &HttpRequest,
     ) -> Result<(), HttpProxyError> {
-        if let Some(auth_header) = request.get_header("proxy-authorization") {
-            if let Some(encoded) = auth_header.strip_prefix("Basic ") {
-                let decoded = general_purpose::STANDARD.decode(encoded)?;
-                let credentials = String::from_utf8(decoded)?;
+        if let Some(auth_header) = request.get_header("proxy-authorization")
+            && let Some(encoded) = auth_header.strip_prefix("Basic ")
+        {
+            let decoded = general_purpose::STANDARD.decode(encoded)?;
+            let credentials = String::from_utf8(decoded)?;
 
-                if let Some(colon_pos) = credentials.find(':') {
-                    let username = &credentials[..colon_pos];
-                    let password = &credentials[colon_pos + 1..];
+            if let Some(colon_pos) = credentials.find(':') {
+                let username = &credentials[..colon_pos];
+                let password = &credentials[colon_pos + 1..];
 
-                    match self.auth_manager.authenticate(username, password).await {
-                        Ok(true) => return Ok(()),
-                        Ok(false) => {}
-                        Err(e) => {
-                            conn.write(PROXY_AUTH_REQUIRED).await?;
-                            return Err(HttpProxyError::AuthenticationFailed(e));
-                        }
+                match self.auth_manager.authenticate(username, password).await {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    Err(e) => {
+                        conn.write(PROXY_AUTH_REQUIRED).await?;
+                        return Err(HttpProxyError::AuthenticationFailed(e));
                     }
                 }
             }

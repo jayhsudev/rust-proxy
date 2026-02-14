@@ -1,13 +1,13 @@
 use crate::common::config::LoggerConfig;
-use log::{debug, error, info, trace, warn, LevelFilter};
+use log::{LevelFilter, debug, error, info, trace, warn};
 use log4rs::{
     append::{
         console::{ConsoleAppender, Target},
         rolling_file::{
-            policy::compound::{
-                roll::fixed_window::FixedWindowRoller, trigger::size::SizeTrigger, CompoundPolicy,
-            },
             RollingFileAppender,
+            policy::compound::{
+                CompoundPolicy, roll::fixed_window::FixedWindowRoller, trigger::size::SizeTrigger,
+            },
         },
     },
     config::{Appender, Config, Root},

@@ -123,17 +123,15 @@ impl Socks5Proxy {
                 conn.write(&[0x05, 0xFF]).await?;
                 return Err(Socks5ProxyError::NoSupportedAuthMethod);
             }
+        } else if methods.contains(&0x00) {
+            info!("Selected no authentication");
+            0x00
+        } else if methods.contains(&0x02) {
+            info!("Selected username/password authentication (no auth required, client will pass)");
+            0x02
         } else {
-            if methods.contains(&0x00) {
-                info!("Selected no authentication");
-                0x00
-            } else if methods.contains(&0x02) {
-                info!("Selected username/password authentication (no auth required, client will pass)");
-                0x02
-            } else {
-                conn.write(&[0x05, 0xFF]).await?;
-                return Err(Socks5ProxyError::NoSupportedAuthMethod);
-            }
+            conn.write(&[0x05, 0xFF]).await?;
+            return Err(Socks5ProxyError::NoSupportedAuthMethod);
         };
 
         conn.write(&[0x05, selected_method]).await?;

@@ -1,4 +1,4 @@
-use bcrypt::{hash, verify, DEFAULT_COST};
+use bcrypt::{DEFAULT_COST, hash, verify};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -63,18 +63,24 @@ mod tests {
 
         let auth_manager = AuthManager::new(&users).unwrap();
 
-        assert!(auth_manager
-            .authenticate("admin", "password")
-            .await
-            .unwrap());
+        assert!(
+            auth_manager
+                .authenticate("admin", "password")
+                .await
+                .unwrap()
+        );
         assert!(auth_manager.authenticate("user1", "pass123").await.unwrap());
-        assert!(!auth_manager
-            .authenticate("admin", "wrongpass")
-            .await
-            .unwrap());
-        assert!(!auth_manager
-            .authenticate("nonexistent", "password")
-            .await
-            .unwrap());
+        assert!(
+            !auth_manager
+                .authenticate("admin", "wrongpass")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !auth_manager
+                .authenticate("nonexistent", "password")
+                .await
+                .unwrap()
+        );
     }
 }

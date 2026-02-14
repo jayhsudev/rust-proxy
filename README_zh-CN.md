@@ -1,7 +1,7 @@
 # Rust Proxy
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
 [![CI](https://github.com/jayhsudev/rust-proxy/actions/workflows/rust.yml/badge.svg)](https://github.com/jayhsudev/rust-proxy/actions/workflows/rust.yml)
 
 [English](README.md) | 中文版本
