@@ -8,7 +8,6 @@ use crate::common::auth::{AuthError, AuthManager};
 use crate::net::conn::BufferedConnection;
 use crate::proxy::forward;
 
-/// SOCKS5 proxy error types
 #[derive(Error, Debug)]
 pub enum Socks5ProxyError {
     #[error("IO error: {0}")]
@@ -31,7 +30,7 @@ pub enum Socks5ProxyError {
     InvalidUtf8(#[from] std::string::FromUtf8Error),
 }
 
-// SOCKS5 reply codes (RFC 1928 Section 6)
+// SOCKS5 reply codes (RFC 1928 §6)
 const REPLY_SUCCEEDED: u8 = 0x00;
 const REPLY_GENERAL_FAILURE: u8 = 0x01;
 const REPLY_HOST_UNREACHABLE: u8 = 0x04;
@@ -39,14 +38,12 @@ const REPLY_CONNECTION_REFUSED: u8 = 0x05;
 const REPLY_COMMAND_NOT_SUPPORTED: u8 = 0x07;
 const REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 0x08;
 
-/// SOCKS5 proxy implementation supporting CONNECT command and username/password authentication
 pub struct Socks5Proxy {
     auth_manager: Arc<AuthManager>,
     connect_timeout: Duration,
 }
 
 impl Socks5Proxy {
-    /// Creates a new SOCKS5 proxy instance
     pub fn new(auth_manager: Arc<AuthManager>, connect_timeout: Duration) -> Self {
         Socks5Proxy {
             auth_manager,
@@ -54,7 +51,6 @@ impl Socks5Proxy {
         }
     }
 
-    /// Handles an incoming SOCKS5 proxy connection
     pub async fn handle_connection(
         &self,
         conn: &mut BufferedConnection,
@@ -108,7 +104,6 @@ impl Socks5Proxy {
         Ok(())
     }
 
-    /// Performs SOCKS5 handshake to negotiate authentication method
     async fn handshake(&self, conn: &mut BufferedConnection) -> Result<u8, Socks5ProxyError> {
         let header = conn.read_exact_bytes(2).await?;
         let version = header[0];
@@ -121,7 +116,6 @@ impl Socks5Proxy {
         let methods = conn.read_exact_bytes(nmethods).await?;
 
         let selected_method = if self.auth_manager.has_users() {
-            // Authentication is required – prefer method 0x02
             if methods.contains(&0x02) {
                 info!("Selected username/password authentication");
                 0x02
@@ -130,7 +124,6 @@ impl Socks5Proxy {
                 return Err(Socks5ProxyError::NoSupportedAuthMethod);
             }
         } else {
-            // No authentication required – prefer 0x00, but also accept 0x02
             if methods.contains(&0x00) {
                 info!("Selected no authentication");
                 0x00
@@ -147,7 +140,7 @@ impl Socks5Proxy {
         Ok(selected_method)
     }
 
-    /// RFC 1929: Username/Password sub-negotiation
+    /// RFC 1929 Username/Password sub-negotiation:
     /// +----+------+----------+------+----------+
     /// |VER | ULEN |  UNAME   | PLEN |  PASSWD  |
     /// +----+------+----------+------+----------+
@@ -187,7 +180,6 @@ impl Socks5Proxy {
         Ok(())
     }
 
-    /// Handles SOCKS5 request parsing and validation, returns address string
     async fn handle_request(
         &self,
         conn: &mut BufferedConnection,
@@ -206,12 +198,14 @@ impl Socks5Proxy {
         }
 
         let addr_str = match addr_type {
+            // IPv4
             0x01 => {
                 let data = conn.read_exact_bytes(4).await?;
                 let port_bytes = conn.read_exact_bytes(2).await?;
                 let port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
                 format!("{}.{}.{}.{}:{}", data[0], data[1], data[2], data[3], port)
             }
+            // Domain name
             0x03 => {
                 let domain_len = conn.read_exact_bytes(1).await?[0] as usize;
                 let domain_bytes = conn.read_exact_bytes(domain_len).await?;
@@ -220,6 +214,7 @@ impl Socks5Proxy {
                 let port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
                 format!("{}:{}", domain, port)
             }
+            // IPv6
             0x04 => {
                 let data = conn.read_exact_bytes(16).await?;
                 let port_bytes = conn.read_exact_bytes(2).await?;
@@ -242,7 +237,6 @@ impl Socks5Proxy {
         Ok(addr_str)
     }
 
-    /// Sends SOCKS5 reply with the given status code
     async fn send_reply(
         &self,
         conn: &mut BufferedConnection,

@@ -24,7 +24,6 @@ pub struct Config {
     pub log: LoggerConfig,
     #[serde(default = "default_buffer_size")]
     pub buffer_size: usize,
-    /// Maximum number of concurrent connections
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
     /// Timeout in seconds for connecting to target servers

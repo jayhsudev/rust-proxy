@@ -32,27 +32,21 @@ impl log::Log for SimpleLogger {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Custom config file path
     #[arg(short, long, value_name = "FILE", default_value = "config.toml")]
     config: String,
 
-    /// Listening address (overrides config file)
     #[arg(long, value_name = "ADDRESS")]
     listen_address: Option<String>,
 
-    /// Log level: trace, debug, info, warn, error
     #[arg(short, long, value_name = "LEVEL", default_value = "info")]
     log_level: String,
 
-    /// Buffer size in bytes (overrides config file)
     #[arg(long, value_name = "SIZE")]
     buffer_size: Option<usize>,
 
-    /// Maximum number of concurrent connections (overrides config file)
     #[arg(long, value_name = "COUNT")]
     max_connections: Option<usize>,
 
-    /// Connection timeout in seconds for target servers (overrides config file)
     #[arg(long, value_name = "SECONDS")]
     connect_timeout: Option<u64>,
 }
@@ -69,7 +63,6 @@ async fn main() {
         }
     };
 
-    // CLI overrides
     if let Some(listen_address) = args.listen_address {
         config.listen_address = listen_address;
     }

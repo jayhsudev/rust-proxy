@@ -9,7 +9,6 @@ use crate::common::auth::AuthManager;
 use crate::net::conn::BufferedConnection;
 use crate::proxy::forward;
 
-/// HTTP proxy error types
 #[derive(Error, Debug)]
 pub enum HttpProxyError {
     #[error("IO error: {0}")]
@@ -32,13 +31,9 @@ pub enum HttpProxyError {
     InvalidBase64(#[from] base64::DecodeError),
 }
 
-/// A single HTTP header preserving its original name casing.
 struct HttpHeader {
-    /// Original header name (preserves case, e.g. "Content-Type")
     name: String,
-    /// Lowercased name used for lookups
     name_lower: String,
-    /// Header value
     value: String,
 }
 
@@ -46,13 +41,11 @@ struct HttpRequest {
     method: String,
     path: String,
     version: String,
-    /// Headers stored in order, preserving original case.
     headers: Vec<HttpHeader>,
     body: Vec<u8>,
 }
 
 impl HttpRequest {
-    /// Lookup a header value by name (case-insensitive).
     fn get_header(&self, name: &str) -> Option<&str> {
         let lower = name.to_lowercase();
         self.headers
@@ -67,7 +60,6 @@ const PROXY_AUTH_REQUIRED: &[u8] = b"HTTP/1.1 407 Proxy Authentication Required\
     Proxy-Authenticate: Basic realm=\"Proxy\"\r\n\
     Content-Length: 0\r\n\r\n";
 
-/// HTTP proxy implementation supporting CONNECT and standard HTTP methods
 pub struct HttpProxy {
     auth_manager: Arc<AuthManager>,
     buffer_size: usize,
@@ -75,7 +67,6 @@ pub struct HttpProxy {
 }
 
 impl HttpProxy {
-    /// Creates a new HTTP proxy instance
     pub fn new(
         auth_manager: Arc<AuthManager>,
         buffer_size: usize,
@@ -88,7 +79,6 @@ impl HttpProxy {
         }
     }
 
-    /// Handles an incoming HTTP proxy connection
     pub async fn handle_connection(
         &self,
         conn: &mut BufferedConnection,
@@ -112,7 +102,6 @@ impl HttpProxy {
         Ok(())
     }
 
-    /// Parses an HTTP request from the buffered connection
     async fn parse_request(
         &self,
         conn: &mut BufferedConnection,
@@ -169,7 +158,6 @@ impl HttpProxy {
         })
     }
 
-    /// Handles proxy authentication
     async fn authenticate(
         &self,
         conn: &mut BufferedConnection,
@@ -186,9 +174,7 @@ impl HttpProxy {
 
                     match self.auth_manager.authenticate(username, password).await {
                         Ok(true) => return Ok(()),
-                        Ok(false) => {
-                            // Wrong credentials – fall through to send 407
-                        }
+                        Ok(false) => {}
                         Err(e) => {
                             conn.write(PROXY_AUTH_REQUIRED).await?;
                             return Err(HttpProxyError::AuthenticationFailed(e));
@@ -202,7 +188,6 @@ impl HttpProxy {
         Err(HttpProxyError::ProxyAuthRequired)
     }
 
-    /// Handles CONNECT method to create a TCP tunnel
     async fn handle_connect(
         &self,
         conn: &mut BufferedConnection,
@@ -220,7 +205,6 @@ impl HttpProxy {
         Ok(())
     }
 
-    /// Handles standard HTTP requests (GET, POST, PUT, etc.)
     async fn handle_http_request(
         &self,
         conn: &mut BufferedConnection,
@@ -254,8 +238,7 @@ impl HttpProxy {
             .as_bytes(),
         );
 
-        // Forward headers preserving original order and case,
-        // skipping hop-by-hop proxy headers.
+        // Skip hop-by-hop proxy headers, preserve original order and case
         for header in &request.headers {
             if !header.name_lower.starts_with("proxy-") && header.name_lower != "connection" {
                 request_data
@@ -271,9 +254,8 @@ impl HttpProxy {
         target_conn.write(&request_data).await?;
         info!("HTTP {} {}", request.method, request.path);
 
-        // For non-CONNECT requests the full request has already been sent.
-        // Only copy the response back (target → client) instead of using
-        // bidirectional forwarding which could mis-forward pipelined data.
+        // Non-CONNECT: request already sent, only copy response back (target -> client)
+        // to avoid mis-forwarding pipelined client data to the target
         tokio::io::copy(&mut target_conn, conn).await?;
         conn.shutdown().await?;
 

@@ -47,7 +47,7 @@ impl TcpProxy {
         }
     }
 
-    /// Accept connections until a Ctrl-C / SIGINT signal is received.
+    /// Accept connections until Ctrl-C / SIGINT is received.
     pub async fn run(&self, listener: TcpListener) {
         info!("TCP proxy listening on {}", listener.local_addr().unwrap());
 
@@ -123,13 +123,13 @@ impl TcpProxy {
         conn.unread(&[first_byte]);
 
         match first_byte {
-            // SOCKS5 starts with 0x05
+            // SOCKS5 protocol starts with 0x05
             0x05 => {
                 info!("SOCKS5 connection from {}", addr);
                 let socks5_proxy = Socks5Proxy::new(auth_manager, connect_timeout);
                 socks5_proxy.handle_connection(&mut conn).await?;
             }
-            // HTTP methods start with an ASCII letter
+            // HTTP methods start with ASCII letters
             b'A'..=b'Z' | b'a'..=b'z' => {
                 info!("HTTP connection from {}", addr);
                 let http_proxy = HttpProxy::new(auth_manager, buffer_size, connect_timeout);

@@ -30,8 +30,7 @@ impl AuthManager {
         !self.users.is_empty()
     }
 
-    /// Verify credentials. The bcrypt comparison runs inside `spawn_blocking`
-    /// so it does not stall the Tokio runtime.
+    /// Bcrypt comparison runs inside `spawn_blocking` to avoid stalling the Tokio runtime.
     pub async fn authenticate(&self, username: &str, password: &str) -> Result<bool, AuthError> {
         if self.users.is_empty() {
             return Ok(true);

@@ -4,7 +4,6 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
-/// Buffered TCP connection wrapper with internal read buffer for efficient protocol parsing
 pub struct BufferedConnection {
     stream: TcpStream,
     read_buffer: Vec<u8>,
@@ -13,7 +12,6 @@ pub struct BufferedConnection {
 }
 
 impl BufferedConnection {
-    /// Creates a new buffered connection with specified buffer size
     pub fn new(stream: TcpStream, buffer_size: usize) -> Self {
         BufferedConnection {
             stream,
@@ -23,7 +21,6 @@ impl BufferedConnection {
         }
     }
 
-    /// Reads data from the stream into the internal read buffer
     pub async fn read(&mut self) -> io::Result<usize> {
         let n = self.stream.read(&mut self.temp_buffer).await?;
         if n > 0 {
@@ -32,7 +29,6 @@ impl BufferedConnection {
         Ok(n)
     }
 
-    /// Consumes `len` bytes from the front of the read buffer and returns them as a Vec<u8>
     pub fn read_from_buffer(&mut self, len: usize) -> Option<Vec<u8>> {
         if self.read_buffer.len() >= len {
             let data = self.read_buffer[..len].to_vec();
@@ -43,7 +39,6 @@ impl BufferedConnection {
         }
     }
 
-    /// Returns a reference to the internal buffer without consuming the data
     #[allow(dead_code)]
     pub fn buffer_slice(&self, len: usize) -> Option<&[u8]> {
         if self.read_buffer.len() >= len {
@@ -53,7 +48,6 @@ impl BufferedConnection {
         }
     }
 
-    /// Consumes `len` bytes from the front of the read buffer without copying (advanced method)
     #[allow(dead_code)]
     pub fn drain_buffer(&mut self, len: usize) -> bool {
         if self.read_buffer.len() >= len {
@@ -64,7 +58,6 @@ impl BufferedConnection {
         }
     }
 
-    /// Ensures at least `n` bytes are available in the read buffer, reading from the stream as needed
     pub async fn ensure_bytes(&mut self, n: usize) -> io::Result<()> {
         while self.read_buffer.len() < n {
             if self.read().await? == 0 {
@@ -77,15 +70,13 @@ impl BufferedConnection {
         Ok(())
     }
 
-    /// Reads exactly `n` bytes, blocking until enough data is available
     pub async fn read_exact_bytes(&mut self, n: usize) -> io::Result<Vec<u8>> {
         self.ensure_bytes(n).await?;
         self.read_from_buffer(n)
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Buffer underflow"))
     }
 
-    /// Reads a line terminated by `\r\n`
-    /// Returns the line content *without* the trailing `\r\n`
+    /// Returns the line content without the trailing `\r\n`.
     pub async fn read_line(&mut self) -> io::Result<String> {
         loop {
             if let Some(pos) = self.read_buffer.windows(2).position(|w| w == b"\r\n") {
@@ -103,46 +94,39 @@ impl BufferedConnection {
         }
     }
 
-    /// Writes data directly to the underlying stream
     pub async fn write(&mut self, data: &[u8]) -> io::Result<()> {
         self.stream.write_all(data).await
     }
 
-    /// Pushes data back to the front of the read buffer (for protocol detection)
     pub fn unread(&mut self, data: &[u8]) {
-        // Optimized for small unread operations to avoid expensive splice
         let mut new_buffer = Vec::with_capacity(data.len() + self.read_buffer.len());
         new_buffer.extend_from_slice(data);
         new_buffer.extend_from_slice(&self.read_buffer);
         self.read_buffer = new_buffer;
     }
 
-    /// Returns whether there's data available in the read buffer
     pub fn has_data(&self) -> bool {
         !self.read_buffer.is_empty()
     }
 
-    /// Returns the configured buffer size
     pub fn buffer_size(&self) -> usize {
         self.buffer_size
     }
 
-    /// Returns the current length of the read buffer
     #[allow(dead_code)]
     pub fn buffer_len(&self) -> usize {
         self.read_buffer.len()
     }
 
-    /// Clears the read buffer
     #[allow(dead_code)]
     pub fn clear_buffer(&mut self) {
         self.read_buffer.clear();
     }
 }
 
-/// Implement `AsyncRead` so that `tokio::io::copy_bidirectional` can be used
-/// for zero-copy data forwarding.  Any residual data in the read buffer is
-/// drained first before delegating to the underlying stream.
+/// Residual data in the read buffer is drained first before delegating to
+/// the underlying stream, so that `tokio::io::copy_bidirectional` works
+/// correctly after protocol negotiation.
 impl AsyncRead for BufferedConnection {
     fn poll_read(
         self: Pin<&mut Self>,

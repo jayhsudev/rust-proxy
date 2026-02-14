@@ -5,7 +5,6 @@ use tokio::time::timeout;
 
 use crate::net::conn::BufferedConnection;
 
-/// Error types for connection operations
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
     #[error("IO error: {0}")]
@@ -20,7 +19,6 @@ pub enum ConnectError {
     AddressNotFound,
 }
 
-/// Resolve a host:port address to a SocketAddr
 pub async fn resolve_address(addr: &str) -> Result<std::net::SocketAddr, ConnectError> {
     tokio::net::lookup_host(addr)
         .await
@@ -29,7 +27,6 @@ pub async fn resolve_address(addr: &str) -> Result<std::net::SocketAddr, Connect
         .ok_or(ConnectError::AddressNotFound)
 }
 
-/// Connect to a target address with timeout
 pub async fn connect_with_timeout(
     addr: &str,
     connect_timeout: Duration,
@@ -41,7 +38,6 @@ pub async fn connect_with_timeout(
         .map_err(|e| ConnectError::ConnectionRefused(e.to_string()))
 }
 
-/// Bidirectional data forwarding between two connections using zero-copy I/O.
 pub async fn forward_bidirectional(
     conn1: &mut BufferedConnection,
     conn2: &mut BufferedConnection,
