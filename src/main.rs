@@ -30,23 +30,29 @@ impl log::Log for SimpleLogger {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about = "A lightweight proxy server supporting SOCKS5 and HTTP protocols", long_about = None)]
 struct Args {
+    /// Path to the configuration file
     #[arg(short, long, value_name = "FILE", default_value = "config.toml")]
     config: String,
 
+    /// Address and port to listen on (e.g. 127.0.0.1:1080)
     #[arg(long, value_name = "ADDRESS")]
     listen_address: Option<String>,
 
+    /// Logging level [trace, debug, info, warn, error]
     #[arg(short, long, value_name = "LEVEL", default_value = "info")]
     log_level: String,
 
+    /// Read/write buffer size in bytes (1–65536)
     #[arg(long, value_name = "SIZE")]
     buffer_size: Option<usize>,
 
+    /// Maximum number of concurrent connections
     #[arg(long, value_name = "COUNT")]
     max_connections: Option<usize>,
 
+    /// Timeout in seconds for connecting to target servers
     #[arg(long, value_name = "SECONDS")]
     connect_timeout: Option<u64>,
 }
