@@ -1,8 +1,36 @@
+use socket2::{SockRef, TcpKeepalive};
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+
+/// Probe interval for TCP keepalive (unix only; Windows uses its own default).
+#[cfg(unix)]
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Applies latency and liveness tuning to a TCP stream.
+///
+/// Keepalive makes abandoned peers (sleep, NAT timeout, cable pull) discoverable
+/// instead of leaking a socket and a connection permit for hours.
+/// Failing to enable it is not fatal: the connection stays usable.
+pub fn tune_stream(stream: &TcpStream, keepalive: Option<Duration>) -> io::Result<()> {
+    stream.set_nodelay(true)?;
+
+    if let Some(idle) = keepalive {
+        let keepalive = TcpKeepalive::new().with_time(idle);
+        #[cfg(unix)]
+        let keepalive = keepalive.with_interval(KEEPALIVE_INTERVAL).with_retries(3);
+
+        if let Err(e) = SockRef::from(stream).set_tcp_keepalive(&keepalive) {
+            log::debug!("Failed to enable TCP keepalive: {}", e);
+        }
+    }
+
+    Ok(())
+}
 
 pub struct BufferedConnection {
     stream: TcpStream,
@@ -39,22 +67,11 @@ impl BufferedConnection {
         }
     }
 
-    #[allow(dead_code)]
     pub fn buffer_slice(&self, len: usize) -> Option<&[u8]> {
         if self.read_buffer.len() >= len {
             Some(&self.read_buffer[..len])
         } else {
             None
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn drain_buffer(&mut self, len: usize) -> bool {
-        if self.read_buffer.len() >= len {
-            self.read_buffer.drain(..len);
-            true
-        } else {
-            false
         }
     }
 
@@ -76,24 +93,6 @@ impl BufferedConnection {
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Buffer underflow"))
     }
 
-    /// Returns the line content without the trailing `\r\n`.
-    pub async fn read_line(&mut self) -> io::Result<String> {
-        loop {
-            if let Some(pos) = self.read_buffer.windows(2).position(|w| w == b"\r\n") {
-                let line = String::from_utf8(self.read_buffer[..pos].to_vec())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                self.read_buffer.drain(..pos + 2);
-                return Ok(line);
-            }
-            if self.read().await? == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "Connection closed before line terminator",
-                ));
-            }
-        }
-    }
-
     pub async fn write(&mut self, data: &[u8]) -> io::Result<()> {
         self.stream.write_all(data).await
     }
@@ -105,22 +104,85 @@ impl BufferedConnection {
         self.read_buffer = new_buffer;
     }
 
-    pub fn has_data(&self) -> bool {
-        !self.read_buffer.is_empty()
-    }
-
     pub fn buffer_size(&self) -> usize {
         self.buffer_size
     }
 
-    #[allow(dead_code)]
     pub fn buffer_len(&self) -> usize {
         self.read_buffer.len()
     }
 
-    #[allow(dead_code)]
-    pub fn clear_buffer(&mut self) {
-        self.read_buffer.clear();
+    /// Splits the connection into independently owned halves without any locking.
+    ///
+    /// Bytes already buffered (for example the first TLS record a client sends
+    /// right after a CONNECT request) are kept by the read half, so no data is
+    /// lost when switching to relay mode.
+    pub fn into_split(self) -> (BufferedReadHalf, BufferedWriteHalf) {
+        let (reader, writer) = self.stream.into_split();
+        (
+            BufferedReadHalf {
+                reader,
+                buffer: self.read_buffer,
+                pos: 0,
+            },
+            BufferedWriteHalf { writer },
+        )
+    }
+}
+
+/// Read half of a [`BufferedConnection`]: drains buffered bytes first.
+pub struct BufferedReadHalf {
+    reader: OwnedReadHalf,
+    buffer: Vec<u8>,
+    pos: usize,
+}
+
+/// Write half of a [`BufferedConnection`].
+pub struct BufferedWriteHalf {
+    writer: OwnedWriteHalf,
+}
+
+impl AsyncRead for BufferedReadHalf {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+
+        let remaining = this.buffer.len().saturating_sub(this.pos);
+        if remaining > 0 {
+            let to_copy = remaining.min(buf.remaining());
+            buf.put_slice(&this.buffer[this.pos..this.pos + to_copy]);
+            this.pos += to_copy;
+
+            if this.pos >= this.buffer.len() {
+                this.buffer.clear();
+                this.pos = 0;
+            }
+
+            return Poll::Ready(Ok(()));
+        }
+
+        Pin::new(&mut this.reader).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for BufferedWriteHalf {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().writer).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().writer).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().writer).poll_shutdown(cx)
     }
 }
 
@@ -192,7 +254,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_line() {
+    async fn test_async_read_drains_buffer() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -202,19 +264,51 @@ mod tests {
         let (server_stream, _) = listener.accept().await.unwrap();
         let mut server_conn = BufferedConnection::new(server_stream, 4096);
 
-        client_conn
-            .write(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
-            .await
-            .unwrap();
+        client_conn.write(b"buffered-data").await.unwrap();
+        drop(client_conn);
 
-        let line1 = server_conn.read_line().await.unwrap();
-        assert_eq!(line1, "GET / HTTP/1.1");
+        // Force part of the payload into the internal buffer.
+        let _ = server_conn.read_exact_bytes(4).await.unwrap();
 
-        let line2 = server_conn.read_line().await.unwrap();
-        assert_eq!(line2, "Host: example.com");
+        let mut out = Vec::new();
+        tokio::io::copy(&mut server_conn, &mut out).await.unwrap();
+        assert_eq!(out, b"ered-data");
+    }
 
-        let line3 = server_conn.read_line().await.unwrap();
-        assert_eq!(line3, "");
+    #[tokio::test]
+    async fn test_into_split_keeps_buffered_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let mut conn = BufferedConnection::new(server_stream, 4096);
+
+        client.write_all(b"prefix-after-handshake").await.unwrap();
+        client.shutdown().await.unwrap();
+
+        // Handshake style read leaves the rest inside the internal buffer.
+        let first = conn.read_exact_bytes(6).await.unwrap();
+        assert_eq!(first, b"prefix");
+
+        let (mut reader, mut writer) = conn.into_split();
+        let mut out = Vec::new();
+        tokio::io::copy(&mut reader, &mut out).await.unwrap();
+        assert_eq!(out, b"-after-handshake");
+
+        // The write half still works after the split.
+        assert!(writer.shutdown().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tune_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        tune_stream(&client, Some(Duration::from_secs(60))).unwrap();
+        tune_stream(&client, None).unwrap();
+        assert!(client.peer_addr().is_ok());
     }
 
     #[tokio::test]
@@ -234,7 +328,7 @@ mod tests {
         assert_eq!(first[0], 0x05);
 
         server_conn.unread(&first);
-        assert!(server_conn.has_data());
+        assert!(server_conn.buffer_len() > 0);
 
         let all = server_conn.read_exact_bytes(3).await.unwrap();
         assert_eq!(all, b"\x05\x01\x00");

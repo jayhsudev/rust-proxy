@@ -1,25 +1,74 @@
-# WProxy configuration file
+# Rust Proxy configuration file
+#
+# NOTE: top-level options must be declared BEFORE the first [section] header.
+# Any key placed after a [section] header belongs to that section, so a stray
+# `buffer_size = 4096` under [users] would be parsed as a user account.
 
-# Listening address
-listen_address = '127.0.0.1:1080'
+# Listening address (HOST:PORT)
+listen_address = "127.0.0.1:1080"
 
-# User authentication information
-[users]
-# Format: username = 'password'
-# Example: admin = 'password'
-
-# Buffer size (1-65536)
+# Handshake parsing buffer size in bytes (1-65536)
 buffer_size = 4096
 
-# Log settings
+# Tunnel relay buffer size in bytes (1024-1048576)
+relay_buffer_size = 32768
+
+# Maximum number of concurrent connections
+max_connections = 1024
+
+# Concurrent connection limit per client IP (0 = unlimited)
+max_connections_per_ip = 0
+
+# Timeout in seconds for connecting to target servers (total budget: DNS + connect)
+connect_timeout = 10
+
+# Timeout in seconds for the client handshake / HTTP request head
+handshake_timeout = 10
+
+# TCP keepalive idle time in seconds, detects abandoned peers (0 = disabled)
+tcp_keepalive = 60
+
+# DNS cache TTL in seconds (0 = disabled)
+dns_cache_ttl = 60
+
+# Successful authentication cache TTL in seconds (0 = disabled)
+# Only a SHA-256 digest of the credentials is kept in memory, never plaintext.
+auth_cache_ttl = 60
+
+# Max concurrent bcrypt verifications (0 = number of CPUs)
+max_auth_concurrency = 0
+
+# Reuse upstream HTTP connections (keep-alive) across client connections
+upstream_keepalive = true
+
+# Idle upstream connections kept per host (0 = pooling disabled)
+upstream_pool_size = 8
+
+# Seconds an idle upstream connection is kept before being dropped
+upstream_idle_timeout = 30
+
+# Metrics/health endpoint, e.g. "127.0.0.1:1081" (empty = disabled)
+# Exposes GET /metrics (Prometheus) and GET /healthz
+metrics_address = ""
+
+# User authentication (optional).
+# Remove or comment out this section to disable authentication.
+# Plaintext passwords are bcrypt-hashed at startup; a value starting with
+# "$2" is treated as an already-hashed bcrypt password.
+#
+# [users]
+# admin = "change-me"
+
 [log]
 # Level for the log (Off, Error, Warn, Info, Debug, Trace)
 level = "Info"
 # Path for the log file
 path = "logs/rust-proxy.log"
-# Pattern for the log file archive
+# Pattern for the log file archive ("{}" is replaced by the index)
 archive_pattern = "logs/archive/rust-proxy-{}.log"
 # Number of log files to keep
 file_count = 5
 # Size of each log file (in MB)
 file_size = 10
+# Write log records on a dedicated thread (bounded queue, never blocks the runtime)
+non_blocking = true

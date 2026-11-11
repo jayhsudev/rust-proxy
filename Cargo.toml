@@ -2,25 +2,53 @@
 name = "rust-proxy"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "A lightweight asynchronous proxy server supporting SOCKS5 and HTTP"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/jayhsudev/rust-proxy"
+keywords = ["proxy", "socks5", "http", "async", "tokio"]
+categories = ["network-programming"]
 default-run = "rust-proxy"
 
 [dependencies]
 # Error handling
-thiserror = "2.0"
+thiserror = "2.0.21"
 # Command-line argument parsing
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 # Configuration file parsing
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.54.1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "time",
+    "signal",
+    "sync",
+] }
 # Logging
-log4rs = "1.3.0"
-log = "0.4.27"
+log4rs = "1.4.0"
+log = "0.4.35"
 # URL parsing
-url = "2.5"
+url = "2.5.8"
 # Base64 encoding/decoding
-base64 = "0.22"
+base64 = "0.23.1"
 # Password hashing
-bcrypt = "0.17"
+bcrypt = "0.19.3"
 # Configuration file handling
-config = "0.15"
+config = "0.15.27"
+# Socket tuning (TCP keepalive)
+socket2 = "0.6"
+# SHA-256 digests for the authentication cache key
+sha2 = "0.11"
+# Zero-copy HTTP/1.x head parsing
+httparse = "1"
+# Error type used by the log4rs Append trait
+anyhow = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

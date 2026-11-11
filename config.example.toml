@@ -1,26 +1,89 @@
 # Rust Proxy configuration example
-# Copy this file as config.toml and modify the configuration as needed
+# Copy this file as config.toml and modify the configuration as needed.
+#
+# IMPORTANT: top-level options must appear BEFORE the first [section] header.
+# A key placed after a section header belongs to that section — for example a
+# stray `buffer_size = 4096` under [users] would be parsed as a user account.
 
 # Proxy server listening address and port
 listen_address = "127.0.0.1:1080"
 
+# Handshake parsing buffer size (bytes)
+# Recommended values: 4096, 8192, 16384
+buffer_size = 4096
+
+# Tunnel relay buffer size (bytes, 1024-1048576)
+# Larger buffers reduce syscalls: 16384-65536 is a good range for high throughput
+relay_buffer_size = 32768
+
+# Maximum number of concurrent connections
+# When the limit is reached, new connections are rejected
+max_connections = 1024
+
+# Concurrent connection limit per client IP (0 = unlimited)
+# Enable this when the proxy is exposed to untrusted networks. Leave it at 0
+# when many clients share one NAT gateway, otherwise legitimate clients get
+# rejected.
+max_connections_per_ip = 0
+
+# Timeout in seconds for connecting to target servers (total budget for DNS
+# resolution plus all connection attempts)
+connect_timeout = 10
+
+# Timeout in seconds for the client handshake / HTTP request head
+# Protects against slowloris-style clients
+handshake_timeout = 10
+
+# TCP keepalive idle time in seconds (0 = disabled)
+# Detects abandoned peers (sleep, NAT timeout, cable pull) so their sockets and
+# connection slots are reclaimed instead of leaking for hours.
+tcp_keepalive = 60
+
+# DNS cache TTL in seconds (0 = disabled)
+dns_cache_ttl = 60
+
+# Successful authentication cache TTL in seconds (0 = disabled)
+# Avoids a bcrypt verification per connection for the same credentials.
+# Only a SHA-256 digest is stored in memory, never the plaintext password.
+auth_cache_ttl = 60
+
+# Max concurrent bcrypt verifications (0 = number of CPUs)
+max_auth_concurrency = 0
+
+# Reuse upstream HTTP connections (keep-alive) across client connections.
+# The proxy parses response framing (Content-Length / chunked / no-body) so a
+# connection is only reused when the response is fully delimited.
+upstream_keepalive = true
+
+# Idle upstream connections kept per host (0 = pooling disabled)
+upstream_pool_size = 8
+
+# Seconds an idle upstream connection is kept before being dropped
+upstream_idle_timeout = 30
+
+# Metrics/health endpoint, e.g. "127.0.0.1:1081" (empty = disabled)
+# Exposes GET /metrics (Prometheus text format) and GET /healthz
+metrics_address = ""
+
 # User authentication configuration (optional)
-# If authentication is not required, you can remove the entire [users] section
+# If authentication is not required, remove the entire [users] section.
+# Plaintext passwords are hashed with bcrypt at startup; a value starting with
+# "$2" is treated as an already-hashed bcrypt password.
 [users]
 # Format: username = "password"
-# Passwords will be hashed using bcrypt at startup
 alice = "password123"
 bob = "securepass"
 
 # Log configuration
 [log]
 # Level for the log (Off, Error, Warn, Info, Debug, Trace)
+# Connection-level events (per tunnel / per request) are logged at Debug.
 level = "Info"
 
 # Log file path
 path = "logs/rust-proxy.log"
 
-# Archive log file name pattern ({} will be replaced by index)
+# Archive log file name pattern ("{}" is replaced by the index)
 archive_pattern = "logs/archive/rust-proxy-{}.log"
 
 # Number of log files to keep
@@ -29,13 +92,6 @@ file_count = 5
 # Maximum size of each log file (MB)
 file_size = 10
 
-# Network buffer size (bytes)
-# Recommended values: 4096, 8192, 16384
-buffer_size = 4096
-
-# Maximum number of concurrent connections
-# When the limit is reached, new connections are rejected
-max_connections = 1024
-
-# Timeout in seconds for connecting to target servers
-connect_timeout = 10
+# Write log records on a dedicated thread with a bounded queue. Set to false if
+# you need strictly synchronous logging (slower, can block under load).
+non_blocking = true

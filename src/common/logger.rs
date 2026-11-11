@@ -1,7 +1,9 @@
 use crate::common::config::LoggerConfig;
+use crate::common::log_writer::AsyncAppender;
 use log::{LevelFilter, debug, error, info, trace, warn};
 use log4rs::{
     append::{
+        Append,
         console::{ConsoleAppender, Target},
         rolling_file::{
             RollingFileAppender,
@@ -18,11 +20,15 @@ use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 
+/// Bounded queue between the logging call sites and the writer thread.
+const LOG_QUEUE_CAPACITY: usize = 8192;
+
 pub fn setup_logger(config: LoggerConfig) -> Result<log4rs::Handle, Box<dyn std::error::Error>> {
     let level = LevelFilter::from_str(&config.level).unwrap_or(LevelFilter::Info);
     let trigger_file_size = config.file_size * 1024 * 1024;
 
-    let stderr = ConsoleAppender::builder().target(Target::Stderr).build();
+    let stderr: Box<dyn Append> =
+        Box::new(ConsoleAppender::builder().target(Target::Stderr).build());
 
     let trigger = SizeTrigger::new(trigger_file_size);
     let roller = FixedWindowRoller::builder()
@@ -40,12 +46,23 @@ pub fn setup_logger(config: LoggerConfig) -> Result<log4rs::Handle, Box<dyn std:
         )))
         .build(&config.path, Box::new(policy))?;
 
+    // Writing happens on dedicated threads so file / stderr I/O never blocks a
+    // Tokio worker thread.
+    let (logfile, stderr): (Box<dyn Append>, Box<dyn Append>) = if config.non_blocking {
+        (
+            Box::new(AsyncAppender::new(Box::new(logfile), LOG_QUEUE_CAPACITY)),
+            Box::new(AsyncAppender::new(stderr, LOG_QUEUE_CAPACITY)),
+        )
+    } else {
+        (Box::new(logfile), stderr)
+    };
+
     let runtime_config = Config::builder()
-        .appender(Appender::builder().build("logfile", Box::new(logfile)))
+        .appender(Appender::builder().build("logfile", logfile))
         .appender(
             Appender::builder()
                 .filter(Box::new(ThresholdFilter::new(level)))
-                .build("stderr", Box::new(stderr)),
+                .build("stderr", stderr),
         )
         .build(
             Root::builder()
