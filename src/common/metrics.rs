@@ -142,6 +142,18 @@ impl Metrics {
                 self.pool_misses_total.load(Ordering::Relaxed) as i64,
             ),
             (
+                "rust_proxy_log_dropped_total",
+                "counter",
+                "Log records dropped because the async queue was full",
+                crate::common::log_writer::dropped_total() as i64,
+            ),
+            (
+                "rust_proxy_log_write_errors_total",
+                "counter",
+                "Log records that could not be written (e.g. disk full)",
+                crate::common::log_writer::write_errors_total() as i64,
+            ),
+            (
                 "rust_proxy_bytes_to_target_total",
                 "counter",
                 "Bytes relayed from clients to targets",
@@ -268,6 +280,9 @@ mod tests {
         assert!(text.contains("rust_proxy_bytes_to_target_total 10"));
         assert!(text.contains("rust_proxy_bytes_to_client_total 20"));
         assert!(text.contains("rust_proxy_pool_hits_total 1"));
+        // Logging health is part of the exposition.
+        assert!(text.contains("# TYPE rust_proxy_log_dropped_total counter"));
+        assert!(text.contains("# TYPE rust_proxy_log_write_errors_total counter"));
     }
 
     #[test]

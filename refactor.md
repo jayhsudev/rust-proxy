@@ -345,3 +345,44 @@
 | `cargo test` | **68 passed** |
 | `cargo build --release` | 通过 |
 | 端到端 | 3 次 GET 复用同一上游连接（`pool_hits` 正确）；HEAD 无 body 且保留 `Content-Length`；chunked 响应正确透传；无长度响应按连接关闭转发；1xx + 200 正常；1 MB POST 正常；`/healthz`、`/`、`/metrics` 200、未知路径 404 |
+
+---
+
+## 12. 第四轮：日志机制复核与加固
+
+### 12.1 复核结论
+
+架构合理（异步写线程 + 有界队列 + 按大小轮转 + 凭据脱敏 + 级别控制），但存在两个可被外部触发的风险和一个可诊断性缺陷：
+
+| # | 问题 | 证据（修复前） |
+|---|------|----------------|
+| 1 | 告警日志无任何限流 | 50 个畸形请求 → 50 条 WARN；`log_connection_error` 把 `InvalidRequest` 直接 `warn!`，认证失败同样每次一条 |
+| 2 | 丢日志不可见 | 队列满仅 `dropped.fetch_add`，不进日志也不进指标；`writer_loop` 用 `let _ = inner.append(record)` 吞掉写盘错误 |
+| 3 | 可诊断性弱 | 格式为秒级时间戳、无 target、无连接标识；实测同秒事件无法排序 |
+
+### 12.2 实施内容
+
+1. **新增 `src/common/log_throttle.rs`**：按类别（连接错误 / 认证失败）的 1 秒窗口限流，默认每类每秒 5 条；被抑制条数在下一条允许记录的末尾以 `(N similar suppressed)` 汇报；`warn_rate_limit = 0` 可关闭。
+2. **丢日志可见**：`log_writer` 增加进程级计数 `DROPPED_TOTAL` / `WRITE_ERRORS_TOTAL`，暴露为 `rust_proxy_log_dropped_total`、`rust_proxy_log_write_errors_total` 两个指标；写盘失败不再被吞掉。
+3. **溢出告警**：writer 线程每满 1 秒通过 `inner.append` 直接输出 `log queue overflow: N record(s) dropped`（直写不过队列，无递归风险）。
+4. **`flush` 有界**：由阻塞 `send` 改为 `try_send` + 重试，累计不超过 2 秒，队列满时不再可能无限阻塞退出流程。
+5. **可诊断性**：默认格式改为 `{d(%Y-%m-%d %H:%M:%S%.3f)} {l:5} {t} - {m}`（毫秒 + 右对齐级别 + target），并通过 `log.format` 可配；`PatternEncoder` 不会自动换行，因此**缺少结尾换行时自动补 `\n`**（初版遗漏导致日志行粘连，已修复并补测试）。
+6. **其他**：`log.queue_capacity`（默认 8192，64–1048576 校验）可配；Unix 下日志文件以 `0600` 预创建；兜底 logger 改为使用配置的级别而不是固定 `Info`。
+
+### 12.3 配置新增
+
+| 配置项 | 默认 | 说明 |
+|--------|------|------|
+| `log.format` | `{d(%Y-%m-%d %H:%M:%S%.3f)} {l:5} {t} - {m}` | chrono 风格格式串，必须含 `{m}` |
+| `log.queue_capacity` | `8192` | 异步队列长度 |
+| `log.warn_rate_limit` | `5` | 每类告警每秒上限，0 = 不限 |
+
+### 12.4 验证
+
+| 项目 | 结果 |
+|------|------|
+| `cargo fmt --check` / `clippy -D warnings` | 通过 / 0 warning |
+| `cargo test` | **74 passed**（新增限流 4 项、写错误计数、flush 有界、格式补换行、配置校验） |
+| 限流实测 | 30 个畸形请求 → **5 条 WARN**（原 30 条）；跨窗口后下一条告警带 `(N similar suppressed)` |
+| 格式实测 | `2026-11-12 11:17:36.637 WARN  rust_proxy::proxy::tcp - ...`：毫秒精度、级别对齐、target 可见、逐行独立 |
+| 轮转实测 | 预置 1.2 MB → 自动滚到 `archive/proxy-0.log`，归档目录自动创建 |

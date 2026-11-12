@@ -12,6 +12,7 @@ use tokio::task;
 use tokio::time::timeout;
 
 use crate::common::auth::AuthManager;
+use crate::common::log_throttle::{self, LogCategory};
 use crate::common::metrics::Metrics;
 use crate::net::conn::{BufferedConnection, tune_stream};
 use crate::proxy::forward::Upstream;
@@ -334,8 +335,17 @@ fn log_connection_error(addr: std::net::SocketAddr, error: &TcpProxyError) {
 
     if expected {
         debug!("Connection from {} closed: {}", addr, error);
-    } else {
-        warn!("Connection error from {}: {}", addr, error);
+        return;
+    }
+
+    // Malformed input is attacker controlled: keep the log rate bounded.
+    match log_throttle::allow(LogCategory::ConnectionError) {
+        Some(0) => warn!("Connection error from {}: {}", addr, error),
+        Some(suppressed) => warn!(
+            "Connection error from {}: {} ({} similar suppressed)",
+            addr, error, suppressed
+        ),
+        None => {}
     }
 }
 

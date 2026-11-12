@@ -95,3 +95,16 @@ file_size = 10
 # Write log records on a dedicated thread with a bounded queue. Set to false if
 # you need strictly synchronous logging (slower, can block under load).
 non_blocking = true
+
+# Log line format. Uses chrono date syntax; {l} level, {t} target, {m} message.
+# A trailing newline is appended automatically when missing.
+format = "{d(%Y-%m-%d %H:%M:%S%.3f)} {l:5} {t} - {m}"
+
+# Queue length of the async writer (64-1048576). When it is full, records are
+# dropped (never blocking the proxy) and counted in the metrics endpoint.
+queue_capacity = 8192
+
+# Max warning records per category per second (0 = unlimited). Connection
+# errors and authentication failures are attacker controlled, so they are
+# rate limited; suppressed counts are reported in the next allowed record.
+warn_rate_limit = 5

@@ -72,3 +72,9 @@ file_count = 5
 file_size = 10
 # Write log records on a dedicated thread (bounded queue, never blocks the runtime)
 non_blocking = true
+# Log line format (chrono date syntax); a trailing newline is added automatically
+format = "{d(%Y-%m-%d %H:%M:%S%.3f)} {l:5} {t} - {m}"
+# Queue length of the async writer (64-1048576); records are dropped when full
+queue_capacity = 8192
+# Max warning records per category per second (0 = unlimited)
+warn_rate_limit = 5

@@ -1,5 +1,6 @@
 use crate::common::auth::{AuthManager, AuthOptions};
 use crate::common::config::Config;
+use crate::common::log_throttle;
 use crate::common::logger;
 use crate::common::metrics::Metrics;
 use crate::proxy::forward::Upstream;
@@ -7,6 +8,7 @@ use crate::proxy::options::ProxyOptions;
 use crate::proxy::tcp::TcpProxy;
 use clap::Parser;
 use log::LevelFilter;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -16,11 +18,13 @@ mod net;
 mod proxy;
 
 /// Fallback logger that writes to stderr when log4rs fails to initialise.
-struct SimpleLogger;
+struct SimpleLogger {
+    level: LevelFilter,
+}
 
 impl log::Log for SimpleLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= LevelFilter::Info
+        metadata.level() <= self.level
     }
 
     fn log(&self, record: &log::Record) {
@@ -104,11 +108,16 @@ async fn main() {
 
     if let Err(e) = logger::setup_logger(config.log.clone()) {
         eprintln!("Failed to initialize logger: {}", e);
-        if let Err(set_err) = log::set_boxed_logger(Box::new(SimpleLogger)) {
+
+        let level = LevelFilter::from_str(config.log.level.trim()).unwrap_or(LevelFilter::Info);
+        if let Err(set_err) = log::set_boxed_logger(Box::new(SimpleLogger { level })) {
             eprintln!("Failed to install fallback logger: {}", set_err);
         }
-        log::set_max_level(LevelFilter::Info);
+        log::set_max_level(level);
     }
+
+    // Remote input must not be able to flood the log file.
+    log_throttle::configure(config.log.warn_rate_limit);
 
     // Never log credentials: only a redacted summary.
     log::info!("Configuration: {}", config.summary());

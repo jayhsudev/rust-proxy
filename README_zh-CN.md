@@ -151,9 +151,24 @@ file_size = 10
 | `upstream_idle_timeout` | `30` | 空闲上游连接保留时长（秒） |
 | `metrics_address` | `""`（关闭） | 指标/健康检查监听地址，如 `127.0.0.1:1081` |
 | `log.non_blocking` | `true` | 日志写盘放到独立线程（有界队列） |
+| `log.format` | `{d(%Y-%m-%d %H:%M:%S%.3f)} {l:5} {t} - {m}` | chrono 风格格式串（级别、target、消息）；缺少结尾换行时自动补 |
+| `log.queue_capacity` | `8192` | 异步写入队列长度（64–1048576） |
+| `log.warn_rate_limit` | `5` | 每类告警每秒最多记录条数；`0` = 不限制 |
 
 启动时会校验配置（监听地址格式、缓冲区大小、日志级别、归档模式、空密码等），
 非法值会直接报错退出，而不是静默回退到默认值。
+
+## 日志机制
+
+- **默认异步**：日志交给有界队列，由各自的专用线程写盘，磁盘慢不会阻塞 Tokio 工作线程；设 `log.non_blocking = false` 可改为严格同步。
+- **丢日志不静默**：队列满时丢弃并计入 `rust_proxy_log_dropped_total`，同时输出限流的告警；写入失败计入 `rust_proxy_log_write_errors_total`。
+- **告警限流**：连接错误与认证失败由外部输入触发，每类每秒最多 `warn_rate_limit` 条，被抑制的条数以 `(N similar suppressed)` 汇总。
+- **轮转**：按大小轮转（`log.file_size` MB、`log.file_count` 个归档、`log.archive_pattern`）；Unix 下活动日志文件以 `0600` 创建。
+- **可诊断**：默认格式包含毫秒时间戳、右对齐级别与模块 target。
+
+```text
+2026-11-12 11:17:36.637 WARN  rust_proxy::proxy::tcp - Connection error from 127.0.0.1:49522: HTTP proxy error: Invalid HTTP request: malformed HTTP head: invalid token
+```
 
 ## 指标与健康检查
 
@@ -180,6 +195,8 @@ curl http://127.0.0.1:1081/metrics      # Prometheus 文本格式
 | `rust_proxy_pool_misses_total` | counter | 需要新建上游连接的次数 |
 | `rust_proxy_bytes_to_target_total` | counter | 转发到目标端的字节数 |
 | `rust_proxy_bytes_to_client_total` | counter | 转发到客户端的字节数 |
+| `rust_proxy_log_dropped_total` | counter | 因队列满被丢弃的日志条数 |
+| `rust_proxy_log_write_errors_total` | counter | 写日志失败的条数（如磁盘已满） |
 
 该端点默认关闭，且是简化的 HTTP/1.1 实现（不支持 keep-alive，一次请求一条连接），请只绑定到可信接口。
 

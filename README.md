@@ -160,10 +160,33 @@ file_size = 10
 | `upstream_idle_timeout` | `30` | Seconds an idle upstream connection is kept (seconds) |
 | `metrics_address` | `""` (off) | Metrics/health endpoint address, e.g. `127.0.0.1:1081` |
 | `log.non_blocking` | `true` | Write log records on a dedicated thread (bounded queue) |
+| `log.format` | `{d(%Y-%m-%d %H:%M:%S%.3f)} {l:5} {t} - {m}` | chrono-style pattern (level, target, message); a trailing newline is added when missing |
+| `log.queue_capacity` | `8192` | Async writer queue length (64–1048576) |
+| `log.warn_rate_limit` | `5` | Max warning records per category per second; `0` = unlimited |
 
 The configuration is validated at startup (address format, buffer size, log
 level, archive pattern, empty credentials…). Invalid values abort startup with a
 clear error message instead of silently falling back to defaults.
+
+## Logging
+
+- **Asynchronous by default**: records are handed to a bounded queue and written
+  by a dedicated thread per sink, so a slow disk never blocks a Tokio worker.
+  Set `log.non_blocking = false` for strictly synchronous writes.
+- **Loss is never silent**: when the queue is full records are dropped, counted in
+  `rust_proxy_log_dropped_total`, and reported with a throttled warning; failed
+  writes are counted in `rust_proxy_log_write_errors_total`.
+- **Rate limited warnings**: connection errors and authentication failures are
+  remote-input driven, so each category emits at most `warn_rate_limit` records
+  per second; suppressed records are reported as `(N similar suppressed)`.
+- **Rotation**: size based (`log.file_size` MB, `log.file_count` archives, pattern
+  `log.archive_pattern`); on unix the active file is created with `0600`.
+- **Diagnosable lines**: millisecond timestamps, padded level and the module
+  target are part of the default format.
+
+```text
+2026-11-12 11:17:36.637 WARN  rust_proxy::proxy::tcp - Connection error from 127.0.0.1:49522: HTTP proxy error: Invalid HTTP request: malformed HTTP head: invalid token
+```
 
 ## Metrics & Health
 
@@ -191,6 +214,8 @@ Exported metrics:
 | `rust_proxy_pool_misses_total` | counter | Requests needing a new upstream connection |
 | `rust_proxy_bytes_to_target_total` | counter | Bytes relayed to targets |
 | `rust_proxy_bytes_to_client_total` | counter | Bytes relayed to clients |
+| `rust_proxy_log_dropped_total` | counter | Log records dropped because the async queue was full |
+| `rust_proxy_log_write_errors_total` | counter | Log records that could not be written (e.g. disk full) |
 
 The endpoint is disabled by default and is a plain HTTP/1.1 responder (no
 keep-alive, one request per connection), so bind it to a trusted interface.

@@ -84,6 +84,15 @@ pub struct LoggerConfig {
     /// Write log records on a dedicated thread (bounded queue)
     #[serde(default = "default_true")]
     pub non_blocking: bool,
+    /// PatternEncoder format; must contain `{m}` for the message
+    #[serde(default = "default_log_format")]
+    pub format: String,
+    /// Bounded queue length of the async writer (64-1048576)
+    #[serde(default = "default_log_queue_capacity")]
+    pub queue_capacity: usize,
+    /// Max warning records per category per second (0 = unlimited)
+    #[serde(default = "default_warn_rate_limit")]
+    pub warn_rate_limit: u32,
 }
 
 impl Default for Config {
@@ -119,6 +128,9 @@ impl Default for LoggerConfig {
             file_count: default_file_count(),
             file_size: default_file_size(),
             non_blocking: true,
+            format: default_log_format(),
+            queue_capacity: default_log_queue_capacity(),
+            warn_rate_limit: default_warn_rate_limit(),
         }
     }
 }
@@ -177,6 +189,18 @@ fn default_cache_ttl() -> u64 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_log_format() -> String {
+    "{d(%Y-%m-%d %H:%M:%S%.3f)} {l:5} {t} - {m}".to_string()
+}
+
+fn default_log_queue_capacity() -> usize {
+    8192
+}
+
+fn default_warn_rate_limit() -> u32 {
+    5
 }
 
 fn default_upstream_pool_size() -> usize {
@@ -359,6 +383,20 @@ impl Config {
             )));
         }
 
+        if self.log.format.trim().is_empty() || !self.log.format.contains("{m}") {
+            return Err(ConfigError::InvalidConfig(format!(
+                "invalid log.format '{}', must be non-empty and contain '{{m}}'",
+                self.log.format
+            )));
+        }
+
+        if !(64..=1024 * 1024).contains(&self.log.queue_capacity) {
+            return Err(ConfigError::InvalidConfig(format!(
+                "invalid log.queue_capacity {}, must be between 64 and 1048576",
+                self.log.queue_capacity
+            )));
+        }
+
         Ok(())
     }
 }
@@ -441,6 +479,11 @@ level = "Debug"
         assert_eq!(config.dns_cache_ttl, 60);
         assert_eq!(config.auth_cache_ttl, 60);
         assert_eq!(config.max_auth_concurrency, 0);
+        assert!(config.log.non_blocking);
+        assert!(config.log.format.contains("{m}"));
+        assert!(config.log.format.contains("%.3f"), "millisecond precision");
+        assert_eq!(config.log.queue_capacity, 8192);
+        assert_eq!(config.log.warn_rate_limit, 5);
     }
 
     #[test]
@@ -527,6 +570,34 @@ level = "Debug"
             Config {
                 log: LoggerConfig {
                     file_count: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Config {
+                log: LoggerConfig {
+                    queue_capacity: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Config {
+                log: LoggerConfig {
+                    queue_capacity: 1024 * 1024 + 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Config {
+                log: LoggerConfig {
+                    format: "no message placeholder".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Config {
+                log: LoggerConfig {
+                    format: String::new(),
                     ..Default::default()
                 },
                 ..Default::default()

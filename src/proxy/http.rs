@@ -6,6 +6,7 @@ use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt
 use tokio::time::timeout;
 
 use crate::common::auth::AuthManager;
+use crate::common::log_throttle::{self, LogCategory};
 use crate::common::metrics::Metrics;
 use crate::net::conn::BufferedConnection;
 use crate::proxy::forward::{self, Upstream};
@@ -266,7 +267,7 @@ impl HttpProxy {
                     }
                     Ok(false) => {
                         // Counted once at the bottom of this function.
-                        warn!("HTTP proxy authentication failed for '{}'", username);
+                        log_auth_failure(username);
                     }
                     Err(e) => {
                         self.metrics.auth_failure();
@@ -499,6 +500,18 @@ where
 
 fn invalid_request(message: impl Into<String>) -> HttpProxyError {
     HttpProxyError::InvalidRequest(message.into())
+}
+
+/// Credentials are attacker controlled, so repeated failures are throttled.
+fn log_auth_failure(username: &str) {
+    match log_throttle::allow(LogCategory::AuthFailure) {
+        Some(0) => warn!("HTTP proxy authentication failed for '{}'", username),
+        Some(suppressed) => warn!(
+            "HTTP proxy authentication failed for '{}' ({} similar suppressed)",
+            username, suppressed
+        ),
+        None => {}
+    }
 }
 
 fn build_request_head(head: &RequestHead, path: &str, keep_alive: bool) -> Vec<u8> {

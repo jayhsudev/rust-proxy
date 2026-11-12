@@ -6,6 +6,7 @@ use thiserror::Error;
 use tokio::time::timeout;
 
 use crate::common::auth::{AuthError, AuthManager};
+use crate::common::log_throttle::{self, LogCategory};
 use crate::common::metrics::Metrics;
 use crate::net::conn::BufferedConnection;
 use crate::proxy::forward::{self, Upstream};
@@ -211,7 +212,16 @@ impl Socks5Proxy {
 
         if !auth_success {
             self.metrics.auth_failure();
-            warn!("SOCKS5 authentication failed for user '{}'", username);
+            // Credentials are attacker controlled, so repeated failures are throttled.
+            match log_throttle::allow(LogCategory::AuthFailure) {
+                Some(0) => warn!("SOCKS5 authentication failed for user '{}'", username),
+                Some(suppressed) => warn!(
+                    "SOCKS5 authentication failed for user '{}' ({} similar suppressed)",
+                    username, suppressed
+                ),
+                None => {}
+            }
+
             return Err(Socks5ProxyError::AuthenticationFailed(
                 AuthError::AuthenticationFailed,
             ));
